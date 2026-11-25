@@ -81,7 +81,14 @@ namespace AX210WatchClaude
                     finally { WTSFreeMemory(b); }
             }
             catch { }
-            return "boot:" + Native2.BootTime().ToString("yyyyMMddHHmm");
+            return "boot:" + DateTime.UtcNow.AddMilliseconds(-(double)Native2.GetTickCount64()).Ticks;   // UTC: immune to DST
+        }
+        /// Same sign-in? Logon keys match exactly; the boot-time fallback is recomputed from the clock, so it gets a tolerance.
+        static bool SameSession(string a, string b)
+        {
+            if (a == b) return true;
+            long x, y;
+            return a.StartsWith("boot:") && b.StartsWith("boot:") && long.TryParse(a.Substring(5), out x) && long.TryParse(b.Substring(5), out y) && Math.Abs(x - y) < TimeSpan.FromMinutes(3).Ticks;
         }
         public static void Set() { try { Directory.CreateDirectory(Path.GetDirectoryName(FlagFile)); File.WriteAllText(FlagFile, SessionKey()); } catch { } }
         public static void Clear() { try { if (File.Exists(FlagFile)) File.Delete(FlagFile); } catch { } }
@@ -91,7 +98,7 @@ namespace AX210WatchClaude
             try
             {
                 if (!File.Exists(FlagFile)) return false;
-                if (File.ReadAllText(FlagFile).Trim() == SessionKey()) return true;
+                if (SameSession(File.ReadAllText(FlagFile).Trim(), SessionKey())) return true;
                 File.Delete(FlagFile);
             }
             catch { }
@@ -201,7 +208,7 @@ namespace AX210WatchClaude
         {
             session = new GameSession { Game = game };
             int gen = Interlocked.Increment(ref wfdGen);
-            if (Cfg.SuspendWifiDirectWhileGaming && CanAct) ThreadPool.QueueUserWorkItem(_ => SuspendWifiDirect(gen));
+            if (Cfg.SuspendWifiDirectWhileGaming && MayChange) ThreadPool.QueueUserWorkItem(_ => SuspendWifiDirect(gen));
         }
 
         void OnGameEnded(string game)

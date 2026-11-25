@@ -228,6 +228,31 @@ namespace AX210WatchClaude
         /// Vendor prefix with the "locally administered" bit cleared: a router's radios share it, a different-brand extender doesn't.
         static string Oui(string mac) { try { var p = mac.Split(':'); return (Convert.ToByte(p[0], 16) & 0xFD).ToString("x2") + ":" + p[1] + ":" + p[2]; } catch { return ""; } }
 
+        /// First run: applies what DetectSetup finds without asking, but only what it's sure of: extenders identified
+        /// against the gateway's MAC and channels that crashed repeatedly here. Anything uncertain is left for the
+        /// setup assistant, which shows the same findings for a manual pass.
+        public string AutoSetup()
+        {
+            var p = DetectSetup();
+            var n = Json.S().Deserialize<Config>(Json.S().Serialize(Cfg));
+            if (p.Ssid != "") n.HomeSsid = p.Ssid;
+            var ext = p.Extenders.Where(a => a.Suggested).Select(a => a.Bssid).Except(n.AvoidBssids, StringComparer.OrdinalIgnoreCase).ToList();
+            n.AvoidBssids = n.AvoidBssids.Concat(ext).ToList();
+            var ch = p.Channels.Where(c => c.Suggested).Select(c => c.Channel).Except(n.AvoidChannels5).ToList();
+            n.AvoidChannels5 = n.AvoidChannels5.Concat(ch).OrderBy(x => x).ToList();
+            if (p.CanLock) { var order = new List<string>(p.BandOrder); foreach (var b in new[] { "5", "6", "2.4" }) if (!order.Contains(b)) order.Add(b); n.BandOrder = order; }
+            ApplySettings(n);
+            lock (StLock) St.SetupDone = true; Save();
+            var parts = new List<string> { "Home network: " + (n.HomeSsid == "" ? "learned when you connect" : n.HomeSsid) };
+            if (n.AvoidBssids.Count > 0) parts.Add(n.AvoidBssids.Count + " extender address" + (n.AvoidBssids.Count == 1 ? "" : "es") + " avoided");
+            if (n.AvoidChannels5.Count > 0) parts.Add("5 GHz channel" + (n.AvoidChannels5.Count == 1 ? " " : "s ") + string.Join(", ", n.AvoidChannels5) + " avoided");
+            int unsure = p.Extenders.Count(a => !a.Suggested); if (unsure > 0) parts.Add(unsure + " possible extender" + (unsure == 1 ? "" : "s") + " to check in the setup assistant");
+            if (!p.CanLock) parts.Add("band control isn't available on this adapter");
+            var summary = string.Join(" · ", parts);
+            Log.Write("INFO", "Set up automatically: " + summary);
+            return summary;
+        }
+
         public SetupPlan DetectSetup()
         {
             var p = new SetupPlan { AdapterDesc = Wlan.Description, Driver = DriverVersion, Intel = Adapter.IsIntel, CanLock = Adapter.CanLockBands, Has6 = Adapter.Supports6 };

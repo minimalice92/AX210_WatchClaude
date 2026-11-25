@@ -27,7 +27,7 @@ namespace AX210WatchClaude
         {
             var o = Cfg; var notes = new List<string>();
             n.ConfigVersion = Math.Max(n.ConfigVersion, o.ConfigVersion);
-            Cfg = n; n.Save();
+            n.Sanitize(); Cfg = n; n.Save(true);
             Pinger.Internet = n.InternetTarget; Pinger.StallMs = n.StallMs;
             if (!Same(o.ExtraGameFolders, n.ExtraGameFolders) || !Same(o.IgnoreGameFolders, n.IgnoreGameFolders)) { Detector.Discover(n); notes.Add("game folders re-scanned (" + Detector.RootCount + " watched)"); }
             if (IsAdmin)
@@ -44,6 +44,7 @@ namespace AX210WatchClaude
             }
             if (!Same(o.BandOrder, n.BandOrder)) { lock (StLock) St.NextProbe = DateTime.MinValue; notes.Add("band order " + string.Join(" › ", n.BandOrder) + " GHz"); }
             if (o.AutoActions != n.AutoActions) notes.Add(n.AutoActions ? "automatic fixes on" : "automatic fixes off (monitor only)");
+            if (!o.AutoActions && n.AutoActions && CanAct) ThreadPool.QueueUserWorkItem(_ => Harden());   // the start-up tuning was skipped while it was off
             if (o.TurboDownloads != n.TurboDownloads) notes.Add("fast downloads " + (n.TurboDownloads ? "on" : "off"));
             Log.Write("INFO", "Settings saved" + (notes.Count > 0 ? ": " + string.Join("; ", notes) : ""));
             nudge.Set();
@@ -54,7 +55,7 @@ namespace AX210WatchClaude
         public string ReloadFromFile()
         {
             Config c;
-            try { c = Json.S().Deserialize<Config>(File.ReadAllText(Paths.ConfigFile)); if (c == null) throw new Exception("the file is empty"); }
+            try { var text = File.ReadAllText(Paths.ConfigFile); if (string.IsNullOrWhiteSpace(text)) throw new Exception("the file is empty"); bool ch; c = Config.Parse(text, out ch); }
             catch (Exception ex) { Log.Write("ERROR", "config.json has a mistake; kept the current settings (" + ex.Message + ")"); return "config.json has a mistake, so nothing changed:\n" + ex.Message; }
             return ApplySettings(c);
         }

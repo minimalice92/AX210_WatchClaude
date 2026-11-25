@@ -1,4 +1,4 @@
-; AX210_WatchClaude installer (Inno Setup 6.4+). Built by ..\build.ps1, which passes /DAppVersion.
+﻿; AX210_WatchClaude installer (Inno Setup 6.4+). Built by ..\build.ps1, which passes /DAppVersion.
 ; Light/dark follows Windows, like the app. Installs per machine (the watchdog needs admin rights to change
 ; adapter settings) and registers a scheduled task so it starts elevated at sign-in without a UAC prompt.
 
@@ -53,29 +53,33 @@ Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 WizardSelectTasks=Install options
-SelectTasksDesc=Choose how AX210_WatchClaude starts.
+SelectTasksDesc=Choose shortcuts and how AX210_WatchClaude starts.
 SelectTasksLabel2=AX210_WatchClaude will be installed to Program Files. Choose your options, then click Install.
 ButtonNext=&Install
 FinishedHeadingLabel=AX210_WatchClaude is installed
-FinishedLabelNoIcons=It runs in the tray (the Wi-Fi icon by the clock). The first time it opens, a short setup assistant checks your adapter and network and fills in the settings.
-FinishedLabel=It runs in the tray (the Wi-Fi icon by the clock). The first time it opens, a short setup assistant checks your adapter and network and fills in the settings.
+FinishedLabelNoIcons=It runs in the tray (the Wi-Fi icon by the clock). The first time it starts, it checks your adapter and network and sets itself up.
+FinishedLabel=It runs in the tray (the Wi-Fi icon by the clock). The first time it starts, it checks your adapter and network and sets itself up.
 
 [Tasks]
-Name: "autostart"; Description: "&Start automatically with Windows (recommended)"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"
+Name: "startmenuicon"; Description: "Add to the Start &menu"
+Name: "autostart"; Description: "&Start automatically with Windows (recommended)"
 
 [InstallDelete]
 ; files from the earlier script-based install
 Type: files; Name: "{app}\uninstall.ps1"
 Type: files; Name: "{app}\install.ps1"
 Type: files; Name: "{app}\README.md"
+; shortcuts from an earlier install whose box is now unticked
+Type: files; Name: "{autodesktop}\{#AppName}.lnk"; Tasks: not desktopicon
+Type: files; Name: "{autoprograms}\{#AppName}.lnk"; Tasks: not startmenuicon
 
 [Files]
 Source: "..\build\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Wi-Fi watchdog for gaming"
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Wi-Fi watchdog for gaming"; Tasks: startmenuicon
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Wi-Fi watchdog for gaming"; Tasks: desktopicon
 
 [Run]

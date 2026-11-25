@@ -84,15 +84,16 @@ Windows and the Intel driver have no setting for "stay off that channel", "stay 
 <img src="docs/setup.png" width="430" alt="Setup assistant: detected adapter, network, extenders and crash-prone channels">
 <img src="docs/settings.png" width="430" alt="Settings window">
 
-- **Setup assistant.** On first run it detects your adapter, driver and what it supports (band locking, 6 GHz), your home network, likely extenders, crash-prone channels from your own event log, and your NAT/UPnP status. Everything is filled in; you review it and press Apply. You can run it again any time.
+- **Automatic setup.** On first run it detects your adapter, driver and what it supports (band locking, 6 GHz), your home network, extenders, and crash-prone channels from your own event log, and applies the settings by itself. It only auto-avoids what it's sure of: an extender has to be told apart from the router by the gateway's MAC address, and a channel has to have crashed the driver repeatedly. A notification says what it set.
+- **Setup assistant.** The same detection, with every finding (including possible extenders it wasn't sure about) and your NAT/UPnP status, to review and change. Open it from Settings or the tray menu any time.
 - **Settings window.** Every option has plain-English help, toggles, validation and live apply, plus a button to open the raw `config.json`.
 - **Follows Windows light/dark mode.** The app, tray menu and installer all switch with it.
 
 ## Install
 
 1. Download **`AX210_WatchClaude-Setup-x.y.z.exe`** from [Releases](https://github.com/minimalice92/AX210_WatchClaude/releases/latest).
-2. Run it and click **Yes** on the Windows prompt. *Start with Windows* and *Desktop shortcut* are pre-checked.
-3. The app opens with the setup assistant. Check it over and press **Apply**.
+2. Run it and click **Yes** on the Windows prompt, then **Install**. *Desktop shortcut*, *Start menu* and *Start with Windows* are pre-checked.
+3. Click **Finish**. The app opens and sets itself up for your PC, then shows a notification with what it chose.
 
 After that it lives in the tray (the Wi-Fi icon by the clock). The icon turns amber for a warning and red for a problem. Left-click for the status window; right-click for tests and options.
 
