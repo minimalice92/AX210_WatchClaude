@@ -22,6 +22,8 @@ AppComments=Wi-Fi watchdog for Intel AX210 cards: keeps gaming connections stead
 VersionInfoVersion={#AppVersion}
 VersionInfoDescription={#AppName} Setup
 DefaultDirName={autopf}\{#AppName}
+; one page: the options, then Install (a different folder can still be chosen with /DIR=)
+DisableDirPage=yes
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
 DisableWelcomePage=yes
@@ -50,12 +52,16 @@ SetupLogging=yes
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
+WizardSelectTasks=Install options
+SelectTasksDesc=Choose how AX210_WatchClaude starts.
+SelectTasksLabel2=AX210_WatchClaude will be installed to Program Files. Choose your options, then click Install.
+ButtonNext=&Install
 FinishedHeadingLabel=AX210_WatchClaude is installed
 FinishedLabelNoIcons=It runs in the tray (the Wi-Fi icon by the clock). The first time it opens, a short setup assistant checks your adapter and network and fills in the settings.
 FinishedLabel=It runs in the tray (the Wi-Fi icon by the clock). The first time it opens, a short setup assistant checks your adapter and network and fills in the settings.
 
 [Tasks]
-Name: "autostart"; Description: "&Start with Windows (recommended)"
+Name: "autostart"; Description: "&Start automatically with Windows (recommended)"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"
 
 [InstallDelete]
