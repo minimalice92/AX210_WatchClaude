@@ -48,6 +48,7 @@ namespace AX210WatchClaude
         public static void InitFonts()
         {
             if (Title != null) return;
+            try { using (var g = Graphics.FromHwnd(IntPtr.Zero)) S = g.DpiX / 96f; } catch { }   // pixel sizes follow the display scale; fonts (points) already do
             // Windows 11's Segoe UI Variable (optical sizes tuned for each size) renders crisper than classic Segoe UI; fall back on Windows 10.
             Title = Pick(new[] { "Segoe UI Variable Display Semibold", "Segoe UI Semibold" }, 13f); Big = Pick(new[] { "Segoe UI Variable Display Semibold", "Segoe UI Semibold" }, 17f);
             CardTitle = Pick(new[] { "Segoe UI Variable Small Semibold", "Segoe UI Semibold" }, 7.5f);

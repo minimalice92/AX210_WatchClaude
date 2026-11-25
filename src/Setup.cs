@@ -235,17 +235,22 @@ namespace AX210WatchClaude
             p.Ssid = c.Connected && !string.IsNullOrEmpty(c.Ssid) ? c.Ssid : Cfg.HomeSsid ?? "";
             p.Where = c.Connected ? Describe(c) : "not connected";
             if (!InGame) { Wlan.Scan(); Thread.Sleep(4000); }
-            var home = Wlan.GetBssList().Where(b => b.Ssid == p.Ssid && p.Ssid != "").ToList();
+            var all = Wlan.GetBssList();
+            var home = all.Where(b => b.Ssid == p.Ssid && p.Ssid != "").ToList();
+            // the scan knows each BSSID's real band (from its frequency): record it before reading the crash history,
+            // whose events only carry channel numbers that 6 GHz shares with 2.4/5 GHz
+            lock (StLock) foreach (var b in home.Where(x => x.Band != "?")) St.KnownBands[b.Bssid] = b.Band;
 
-            // which vendor prefix is the router? the gateway's own MAC, else the access point we're on, else the strongest
-            var groups = home.GroupBy(b => Oui(b.Bssid)).ToDictionary(g => g.Key, g => g.ToList());
-            string gw = Adapter.Gateway(), gwMac = gw == null ? null : MacOf(gw), router = null;
-            if (gwMac != null && groups.ContainsKey(Oui(gwMac))) router = Oui(gwMac);
-            else if (c.Connected && !IsAvoidBssid(c.Bssid)) router = Oui(c.Bssid);
-            else if (home.Count > 0) router = Oui(home.OrderByDescending(b => b.Rssi).First().Bssid);
+            // Which vendor prefix is the router? Only the gateway's own MAC says so for sure. Without that, the brand with
+            // the most radios is the likely router, but nothing is pre-ticked: the PC might be sitting on the extender.
+            var groups = home.Where(b => !IsAvoidBssid(b.Bssid)).GroupBy(b => Oui(b.Bssid)).ToDictionary(g => g.Key, g => g.ToList());
+            string gw = Adapter.Gateway(), gwMac = gw == null ? null : MacOf(gw), router = null; bool sure = false;
+            if (gwMac != null && groups.ContainsKey(Oui(gwMac))) { router = Oui(gwMac); sure = true; }
+            else if (groups.Count == 1) router = groups.Keys.First();
+            else if (groups.Count > 1) router = groups.OrderByDescending(g => g.Value.Count).ThenByDescending(g => g.Value.Max(b => b.Rssi)).First().Key;
             p.Routers = router != null && groups.ContainsKey(router) ? groups[router].Count : 0;
-            foreach (var b in home.Where(b => router != null && Oui(b.Bssid) != router).OrderBy(b => b.Bssid))
-                p.Extenders.Add(new SetupPlan.Ap { Bssid = b.Bssid, Info = b.Band + " GHz · channel " + b.Channel + " · " + b.Rssi + " dBm", Suggested = true });
+            foreach (var b in home.Where(b => router != null && Oui(b.Bssid) != router && !IsAvoidBssid(b.Bssid)).OrderBy(b => b.Bssid))
+                p.Extenders.Add(new SetupPlan.Ap { Bssid = b.Bssid, Info = b.Band + " GHz · channel " + b.Channel + " · " + b.Rssi + " dBm" + (sure ? "" : " · tick it if this isn't your router"), Suggested = sure });
             foreach (var b in Cfg.AvoidBssids.Where(x => !p.Extenders.Any(e => e.Bssid == x)))
                 p.Extenders.Add(new SetupPlan.Ap { Bssid = b, Info = "already on your avoid list" + (home.Any(h => h.Bssid == b) ? "" : " (not visible right now)"), Suggested = true });
 
@@ -308,7 +313,6 @@ namespace AX210WatchClaude
         public SetupForm(Watchdog w, Action<string> onDone)
         {
             wd = w; done = onDone; Ui.InitFonts(); T = Theme.Current();
-            if (Ui.S < 1f) using (var g0 = CreateGraphics()) Ui.S = g0.DpiX / 96f;
             Text = "AX210_WatchClaude — Setup"; Icon = Brand.AppIcon(); BackColor = T.Bg; ForeColor = T.Text; Font = Ui.Body; AutoScaleMode = AutoScaleMode.None; DoubleBuffered = true;
             StartPosition = FormStartPosition.CenterScreen; MaximizeBox = false; cardW = Ui.D(660);
             ClientSize = new Size(cardW + Ui.D(48), Ui.D(560));
@@ -396,8 +400,7 @@ namespace AX210WatchClaude
                 var ext = new SectionCard(T, "Extenders to avoid", cardW, p.Extenders.Count == 0
                     ? "No extender is broadcasting your network name. (Mesh nodes from the same brand as the router aren't flagged.)"
                     : "These broadcast your network name but aren't your router. A desktop next to the router does better staying on the router itself.");
-                foreach (var a in p.Extenders) { var t = Tog(a.Suggested); apToggles.Add(Tuple.Create(t, a.Bssid)); ext.AddRow(Ui.Rd(a.Bssid), Ui.Rd(a.Info), t); }
-                flow.Controls.Add(ext);
+                foreach (var a in p.Extenders) { var t = Tog(a.Suggested); apToggles.Add(Tuple.Create(t, a.Bssid)); ext.AddRow(Ui.Rd(a.Bssid), Ui.Rd(a.Info), t); }                flow.Controls.Add(ext);
 
                 var chs = new SectionCard(T, "Crash-prone channels", cardW, p.Channels.Count == 0
                     ? "No 5 GHz channel has crashed the driver here. The watchdog still quarantines any channel that starts crashing."

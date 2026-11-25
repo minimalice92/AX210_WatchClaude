@@ -1,22 +1,16 @@
-<p align="center">
-  <img src="docs/logo-128.png" width="96" alt="AX210_WatchClaude logo">
-</p>
+<img src="docs/logo-128.png" width="72" alt="AX210_WatchClaude logo">
 
-<h1 align="center">AX210_WatchClaude</h1>
+# AX210_WatchClaude
 
-<p align="center">
-  <b>A tray app that keeps an Intel AX210 Wi-Fi card steady for online gaming on Windows 11.</b><br>
-  It watches the driver, works around its firmware crashes, keeps the card on the best band and access point, and gives game traffic priority.
-</p>
+**A tray app that keeps an Intel AX210 Wi-Fi card steady for online gaming on Windows 11.**
+It watches the driver, works around its firmware crashes, keeps the card on the best band and access point, and gives game traffic priority.
 
-<p align="center">
-  <a href="https://github.com/minimalice92/AX210_WatchClaude/releases/latest"><img alt="Download" src="https://img.shields.io/github/v/release/minimalice92/AX210_WatchClaude?label=download&color=5B6CFF"></a>
-  <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
-  <img alt=".NET Framework 4.8" src="https://img.shields.io/badge/.NET%20Framework-4.8-512BD4">
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a>
-</p>
+[![Download](https://img.shields.io/github/v/release/minimalice92/AX210_WatchClaude?label=download&color=5B6CFF)](https://github.com/minimalice92/AX210_WatchClaude/releases/latest)
+![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4)
+![.NET Framework 4.8](https://img.shields.io/badge/.NET%20Framework-4.8-512BD4)
+[![MIT license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-<p align="center"><img src="docs/status.png" width="880" alt="The status window: health banner, ping, loss, signal and link tiles, a 3-minute ping graph, connection/system/game cards and the event list"></p>
+<img src="docs/status.png" width="880" alt="The status window: health banner, ping, loss, signal and link tiles, a 3-minute ping graph, connection/system/game cards and the event list">
 
 ---
 
@@ -70,7 +64,7 @@ Windows and the Intel driver have no setting for "stay off that channel", "stay 
 
 ### Tests and diagnostics
 
-<p align="center"><img src="docs/checkup.png" width="880" alt="Network checkup results: about 25 checks graded OK, WARN or FAIL"></p>
+<img src="docs/checkup.png" width="880" alt="Network checkup results: about 25 checks graded OK, WARN or FAIL">
 
 | | |
 |---|---|
@@ -83,15 +77,12 @@ Windows and the Intel driver have no setting for "stay off that channel", "stay 
 | **History** | Per-channel table (hours, crashes, stalls), game list, game sessions, driver versions, and a full event timeline. |
 | **UDP port watch** | Warns before Windows runs out of UDP ports (Tcpip 4266) and names the app using them. |
 
-<p align="center"><img src="docs/channels.png" width="880" alt="Channels tab: hours, live and historical crashes, associations and stalls for every band/channel"></p>
+<img src="docs/channels.png" width="880" alt="Channels tab: hours, live and historical crashes, associations and stalls for every band/channel">
 
 ### Set up for you
 
-<p align="center">
-  <img src="docs/setup.png" width="430" alt="Setup assistant: detected adapter, network, extenders and crash-prone channels">
-  &nbsp;
-  <img src="docs/settings.png" width="430" alt="Settings window">
-</p>
+<img src="docs/setup.png" width="430" alt="Setup assistant: detected adapter, network, extenders and crash-prone channels">
+<img src="docs/settings.png" width="430" alt="Settings window">
 
 - **Setup assistant.** On first run it detects your adapter, driver and what it supports (band locking, 6 GHz), your home network, likely extenders, crash-prone channels from your own event log, and your NAT/UPnP status. Everything is filled in; you review it and press Apply. You can run it again any time.
 - **Settings window.** Every option has plain-English help, toggles, validation and live apply, plus a button to open the raw `config.json`.
@@ -107,7 +98,7 @@ After that it lives in the tray (the Wi-Fi icon by the clock). The icon turns am
 
 > **Why does it need admin rights?** Changing adapter settings, power settings and traffic priority needs them. The installer creates a scheduled task that starts the app with those rights when you sign in, so you never see a UAC prompt after installing. The task also restarts the app within 5 minutes if it ever stops. *Exit* in the tray menu means "off until next sign-in".
 
-**Uninstall** from *Settings → Apps*, like any other app. It asks whether to put your adapter and DNS settings back the way they were (on by default) and whether to delete its logs and settings (off by default).
+**Uninstall** from *Settings → Apps*, like any other app. It asks whether to put your adapter, DNS and power settings back the way they were (on by default) and whether to delete its logs and settings (off by default). The rules it added (game priority, upload limiter) are always removed.
 
 ### Compatibility
 
@@ -116,6 +107,7 @@ After that it lives in the tray (the Wi-Fi icon by the clock). The icon turns am
 | **Best on** | Intel AX210 / AX211 / AX411 (Wi-Fi 6E) on Windows 11 with Intel's driver |
 | **Also works on** | Other Intel Wi-Fi 6/6E/7 cards (AX200, AX201, BE200…). Features adapt: no 6 GHz means 5 and 2.4 GHz only. |
 | **Other brands** | Monitoring, low-latency mode, game priority, tests and the checkup work. Band locking is Intel-only, so it stays off. |
+| **Standard (non-admin) accounts** | Runs in monitor-only mode: it watches, tests and reports, but can't change adapter settings. |
 | **Needs** | Windows 10 1809+ or Windows 11, .NET Framework 4.8 (built into both) |
 
 ## How it works
@@ -151,7 +143,7 @@ For each game it adds a Windows QoS policy: `New-NetQosPolicy -AppPathNameMatchC
 | | |
 |---|---|
 | `C:\Program Files\AX210_WatchClaude\` | the app |
-| `C:\ProgramData\AX210_WatchClaude\config.json` | settings (also editable in the Settings window) |
+| `C:\ProgramData\AX210_WatchClaude\config.json` | settings (also editable in the Settings window). If a hand edit breaks it, the app runs on defaults without overwriting it, and tells you. |
 | `…\state.json` | learned data: your original settings (for restore), quarantines, per-channel stats, games |
 | `…\status.json` | live snapshot, updated every 5 s |
 | `…\logs\watch.log` | timeline of everything it saw and did |
@@ -188,6 +180,6 @@ Handy switches: `--selftest <file> [--checkup]` writes a read-only diagnostic re
 
 Written by Claude (Anthropic) with [minimalice92](https://github.com/minimalice92), from one gaming PC's event logs. Firmware error names come from the Linux `iwlwifi` driver.
 
-Not affiliated with Intel. Use at your own risk. Every change it makes can be reverted from the tray menu or the uninstaller.
+Not affiliated with Intel. Use at your own risk. Its changes (adapter, DNS, power and traffic-priority settings) can be reverted from the tray menu (*Restore original Wi-Fi settings*) or the uninstaller.
 
 MIT licensed, see [LICENSE](LICENSE).

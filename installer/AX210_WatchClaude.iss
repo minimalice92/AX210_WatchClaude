@@ -82,7 +82,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Wi-Fi w
 Filename: "{app}\{#AppExe}"; Parameters: "--register-task --autostart"; StatusMsg: "Setting up the background task…"; Flags: runhidden waituntilterminated; Tasks: autostart
 Filename: "{app}\{#AppExe}"; Parameters: "--register-task"; StatusMsg: "Setting up the background task…"; Flags: runhidden waituntilterminated; Tasks: not autostart
 Filename: "{app}\{#AppExe}"; Description: "Open AX210_WatchClaude"; Flags: nowait postinstall skipifsilent runasoriginaluser
-Filename: "{app}\{#AppExe}"; Parameters: "--tray"; Flags: nowait runasoriginaluser; Check: WizardSilent
+Filename: "{app}\{#AppExe}"; Parameters: "--background"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"

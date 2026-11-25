@@ -56,16 +56,42 @@ namespace AX210WatchClaude
     static class ExitFlag
     {
         static string FlagFile { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Paths.App, "exited.flag"); } }
-        public static void Set() { try { Directory.CreateDirectory(Path.GetDirectoryName(FlagFile)); File.WriteAllText(FlagFile, Native2.BootTime().ToString("o")); } catch { } }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct WTSINFO
+        {
+            public int State, SessionId, IncomingBytes, OutgoingBytes, IncomingFrames, OutgoingFrames, IncomingCompressedBytes, OutgoingCompressedBytes;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string WinStationName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 17)] public string Domain;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 21)] public string UserName;
+            public long ConnectTime, DisconnectTime, LastInputTime, LogonTime, CurrentTime;
+        }
+        [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool WTSQuerySessionInformation(IntPtr server, int session, int infoClass, out IntPtr buffer, out int bytes);
+        [DllImport("wtsapi32.dll")] static extern void WTSFreeMemory(IntPtr p);
+
+        /// Identifies this sign-in: the session's logon time. It changes on sign-out/sign-in and on every start-up (Fast
+        /// Startup signs you out first), and is the same for the elevated and normal processes of one sign-in.
+        static string SessionKey()
+        {
+            try
+            {
+                IntPtr b; int n;
+                if (WTSQuerySessionInformation(IntPtr.Zero, Process.GetCurrentProcess().SessionId, 24 /* WTSSessionInfo */, out b, out n))
+                    try { var i = (WTSINFO)Marshal.PtrToStructure(b, typeof(WTSINFO)); if (i.LogonTime != 0) return "logon:" + i.LogonTime; }
+                    finally { WTSFreeMemory(b); }
+            }
+            catch { }
+            return "boot:" + Native2.BootTime().ToString("yyyyMMddHHmm");
+        }
+        public static void Set() { try { Directory.CreateDirectory(Path.GetDirectoryName(FlagFile)); File.WriteAllText(FlagFile, SessionKey()); } catch { } }
         public static void Clear() { try { if (File.Exists(FlagFile)) File.Delete(FlagFile); } catch { } }
-        /// True when the user chose Exit earlier in this Windows session, so the self-restart leaves it alone.
-        public static bool ExitedThisBoot()
+        /// True when the user chose Exit earlier in this sign-in, so the self-restart and logon start leave it alone.
+        public static bool ExitedThisSession()
         {
             try
             {
                 if (!File.Exists(FlagFile)) return false;
-                var t = DateTime.Parse(File.ReadAllText(FlagFile).Trim(), null, DateTimeStyles.RoundtripKind);
-                if (Math.Abs((t.ToLocalTime() - Native2.BootTime()).TotalMinutes) < 3) return true;
+                if (File.ReadAllText(FlagFile).Trim() == SessionKey()) return true;
                 File.Delete(FlagFile);
             }
             catch { }
@@ -174,13 +200,15 @@ namespace AX210WatchClaude
         void OnGameStarted(string game)
         {
             session = new GameSession { Game = game };
-            if (Cfg.SuspendWifiDirectWhileGaming && CanAct) ThreadPool.QueueUserWorkItem(_ => SuspendWifiDirect());
+            int gen = Interlocked.Increment(ref wfdGen);
+            if (Cfg.SuspendWifiDirectWhileGaming && CanAct) ThreadPool.QueueUserWorkItem(_ => SuspendWifiDirect(gen));
         }
 
         void OnGameEnded(string game)
         {
             var ses = session; session = null;
-            if (St.WifiDirectDisabled.Count > 0) ThreadPool.QueueUserWorkItem(_ => RestoreWifiDirect(game + " closed"));
+            int gen = Interlocked.Increment(ref wfdGen);
+            if (CanAct) ThreadPool.QueueUserWorkItem(_ => RestoreWifiDirect(game + " closed", gen));   // always queued: a pause may still be in flight
             if (ses == null) return;
             double mins = (DateTime.Now - ses.Start).TotalMinutes; if (mins < 2) return;
             SessionRec rec; string where;
@@ -239,23 +267,40 @@ namespace AX210WatchClaude
         }
 
         // ---------- Wi-Fi Direct
-        void SuspendWifiDirect()
+        // Pause and restore run one at a time, and each game start/end bumps wfdGen. A queued pause or restore whose game
+        // event has since been superseded does nothing, so a game that closes while its pause is still running gets
+        // restored, and a quick game switch doesn't restore in the middle of the next game.
+        readonly object wfdLock = new object(); int wfdGen;
+        void SuspendWifiDirect(int gen = -1)
         {
-            string so, se;
-            Ps.Run("$a = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.InterfaceDescription -like 'Microsoft Wi-Fi Direct Virtual Adapter*' -and $_.AdminStatus -eq 'Up' -and $_.Status -ne 'Up' }); " +
-                   "$a | Disable-NetAdapter -Confirm:$false; 'WFD:' + (($a | ForEach-Object { $_.InterfaceDescription }) -join '|')", 60, out so, out se);
-            var line = (so ?? "").Split('\n').Select(x => x.Trim()).FirstOrDefault(x => x.StartsWith("WFD:")) ?? "WFD:";
-            var names = line.Substring(4).Split(new[] { '|' }, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).ToList();
-            if (names.Count > 0) { lock (StLock) St.WifiDirectDisabled = names; Save(); Log.Write("GAME", "Wi-Fi Direct paused for the game (" + names.Count + " virtual adapters)"); }
-            else if (!string.IsNullOrWhiteSpace(se)) Log.Write("ERROR", "Couldn't pause Wi-Fi Direct: " + se.Trim());
+            lock (wfdLock)
+            {
+                if (gen >= 0 && gen != Volatile.Read(ref wfdGen)) return;
+                string so, se;
+                Ps.Run("$a = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.InterfaceDescription -like 'Microsoft Wi-Fi Direct Virtual Adapter*' -and $_.AdminStatus -eq 'Up' -and $_.Status -ne 'Up' }); " +
+                       "$a | Disable-NetAdapter -Confirm:$false; 'WFD:' + (($a | ForEach-Object { $_.InterfaceDescription }) -join '|')", 60, out so, out se);
+                var line = (so ?? "").Split('\n').Select(x => x.Trim()).FirstOrDefault(x => x.StartsWith("WFD:")) ?? "WFD:";
+                var names = line.Substring(4).Split(new[] { '|' }, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).ToList();
+                if (names.Count > 0)
+                {
+                    lock (StLock) St.WifiDirectDisabled = St.WifiDirectDisabled.Union(names).ToList();   // add to, never replace, what's already paused
+                    Save(); Log.Write("GAME", "Wi-Fi Direct paused for the game (" + names.Count + " virtual adapters)");
+                }
+                else if (!string.IsNullOrWhiteSpace(se)) Log.Write("ERROR", "Couldn't pause Wi-Fi Direct: " + se.Trim());
+            }
         }
-        public void RestoreWifiDirect(string why)
+        public void RestoreWifiDirect(string why) { RestoreWifiDirect(why, -1); }
+        void RestoreWifiDirect(string why, int gen)
         {
-            List<string> names; lock (StLock) names = St.WifiDirectDisabled.ToList(); if (names.Count == 0) return;
-            string so, se;
-            bool ok = Ps.Run("Get-NetAdapter -IncludeHidden | Where-Object { @(" + string.Join(",", names.Select(Ps.Q)) + ") -contains $_.InterfaceDescription } | Enable-NetAdapter -Confirm:$false", 60, out so, out se);
-            if (ok && string.IsNullOrWhiteSpace(se)) { lock (StLock) St.WifiDirectDisabled.Clear(); Save(); Log.Write("GAME", "Wi-Fi Direct restored (" + why + ")"); }
-            else Log.Write("ERROR", "Couldn't restore Wi-Fi Direct: " + se);
+            lock (wfdLock)
+            {
+                if (gen >= 0 && gen != Volatile.Read(ref wfdGen)) return;   // another game started since
+                List<string> names; lock (StLock) names = St.WifiDirectDisabled.ToList(); if (names.Count == 0) return;
+                string so, se;
+                bool ok = Ps.Run("Get-NetAdapter -IncludeHidden | Where-Object { @(" + string.Join(",", names.Select(Ps.Q)) + ") -contains $_.InterfaceDescription } | Enable-NetAdapter -Confirm:$false", 60, out so, out se);
+                if (ok && string.IsNullOrWhiteSpace(se)) { lock (StLock) St.WifiDirectDisabled.Clear(); Save(); Log.Write("GAME", "Wi-Fi Direct restored (" + why + ")"); }
+                else Log.Write("ERROR", "Couldn't restore Wi-Fi Direct: " + se);
+            }
         }
 
         // ---------- bandwidth guard
@@ -487,7 +532,7 @@ namespace AX210WatchClaude
                    "$x.aspm=((powercfg /query SCHEME_CURRENT 501a4d13-42af-4429-9fd1-a8218c268e20 ee12f906-d277-404b-b6da-e5fa1a576df5 | Select-String 'Current AC Power Setting Index') -replace '.*:\\s*','').Trim(); " +
                    "$x.autotune=((netsh int tcp show global | Select-String 'Auto-Tuning') -replace '.*:\\s*','').Trim(); " +
                    "$x.wfd=((Get-NetAdapter -IncludeHidden | Where-Object { $_.InterfaceDescription -like 'Microsoft Wi-Fi Direct Virtual Adapter*' } | ForEach-Object { [string]$_.AdminStatus }) -join ','); " +
-                   "$x.qos=@(Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'AX210_WatchClaude*' }).Count; " +
+                   "$x.qos=@(Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'AX210_WatchClaude_*' -and $_.Name -ne 'AX210_WatchClaude_UploadCap' }).Count; " +
                    "$x.Keys | ForEach-Object { $_ + '=' + $x[$_] }", 60, out so, out se);
             var kv = (so ?? "").Split('\n').Select(l => l.Trim()).Where(l => l.Contains("=")).ToDictionary(l => l.Substring(0, l.IndexOf('=')), l => l.Substring(l.IndexOf('=') + 1));
             Func<string, string> K = k => { string v; return kv.TryGetValue(k, out v) ? v : ""; };

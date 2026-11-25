@@ -52,9 +52,9 @@ using Microsoft.Win32;
 [assembly: System.Reflection.AssemblyDescription("AX210_WatchClaude — Wi-Fi watchdog for gaming")]
 [assembly: System.Reflection.AssemblyCompany("minimalice92")]
 [assembly: System.Reflection.AssemblyCopyright("MIT License")]
-[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersion("1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.0.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.0.1.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("1.0.1")]
 
 namespace AX210WatchClaude
 {
@@ -150,11 +150,20 @@ namespace AX210WatchClaude
         public int KeepSampleDays { get; set; } = 14;
         public int UdpWarnThreshold { get; set; } = 8000;
 
+        /// True when config.json couldn't be read. The app then runs on defaults but never writes them over the
+        /// file by itself (a copy is kept as config.json.broken); an explicit save from Settings/Setup/Reload clears it.
+        public static bool Broken;
         public static Config Load()
         {
             Config c = null;
-            try { if (File.Exists(Paths.ConfigFile)) c = Json.S().Deserialize<Config>(File.ReadAllText(Paths.ConfigFile)); }
-            catch (Exception ex) { Log.Write("ERROR", "config.json could not be read (" + ex.Message + "); using defaults"); return new Config(); }
+            try { if (File.Exists(Paths.ConfigFile)) c = Json.S().Deserialize<Config>(File.ReadAllText(Paths.ConfigFile)); Broken = false; }
+            catch (Exception ex)
+            {
+                Broken = true;
+                try { File.Copy(Paths.ConfigFile, Paths.ConfigFile + ".broken", true); } catch { }
+                Log.Write("ERROR", "config.json has a mistake (" + ex.Message + "). Running on default settings until it's fixed; the file is left as it is (copy: config.json.broken)");
+                var d = new Config(); foreach (var n in GameList.Popular) d.GameProcesses.Add(n); d.Sanitize(); return d;
+            }
             bool save = c == null; if (c == null) c = new Config();
             if (c.ConfigVersion < 2)   // v2: multi-game support
             {
@@ -162,10 +171,51 @@ namespace AX210WatchClaude
                 c.ConfigVersion = 2; save = true;
             }
             if (c.ConfigVersion < 3) { c.ConfigVersion = 3; save = true; }   // v3: new options get their defaults written out
+            if (c.Sanitize()) save = true;
             if (save) c.Save();
             return c;
         }
-        public void Save() { try { Json.WriteAtomic(Paths.ConfigFile, Json.Pretty(Json.S().Serialize(this))); } catch (Exception ex) { Log.Write("ERROR", "save config: " + ex.Message); } }
+        /// Repairs list entries that can't be program names (quotes from "Copy as path", folders, illegal characters).
+        public bool Sanitize()
+        {
+            bool changed = false;
+            Func<List<string>, bool, List<string>> clean = (list, exe) =>
+            {
+                var r = new List<string>();
+                foreach (var raw in list ?? new List<string>())
+                {
+                    var n = Names.CleanProgram(raw, exe); if (n != raw) changed = true;
+                    if (n != null && !r.Contains(n, StringComparer.OrdinalIgnoreCase)) r.Add(n);
+                }
+                return r;
+            };
+            QosAlwaysExes = clean(QosAlwaysExes, true); GameProcesses = clean(GameProcesses, false);
+            if (BandOrder == null || BandOrder.Count == 0) { BandOrder = new List<string> { "5", "6", "2.4" }; changed = true; }
+            if (AvoidBssids == null) { AvoidBssids = new List<string>(); changed = true; }
+            if (AvoidChannels5 == null) { AvoidChannels5 = new List<int>(); changed = true; }
+            return changed;
+        }
+        /// explicitSave = false for the app's own background saves, which are skipped while the file is broken.
+        public void Save(bool explicitSave = true)
+        {
+            if (Broken && !explicitSave) return;
+            try { Json.WriteAtomic(Paths.ConfigFile, Json.Pretty(Json.S().Serialize(this))); Broken = false; } catch (Exception ex) { Log.Write("ERROR", "save config: " + ex.Message); }
+        }
+    }
+
+    static class Names
+    {
+        static readonly char[] Bad = Path.GetInvalidFileNameChars();
+        /// "C:\Games\Foo.exe" (with or without quotes) -> Foo.exe (exe=true) or Foo (exe=false); null if nothing usable is left.
+        public static string CleanProgram(string raw, bool exe)
+        {
+            var s = (raw ?? "").Trim().Trim('"', '\'').Trim();
+            int i = s.LastIndexOfAny(new[] { '\\', '/' }); if (i >= 0) s = s.Substring(i + 1);
+            s = new string(s.Where(ch => Array.IndexOf(Bad, ch) < 0).ToArray()).Trim();
+            if (s.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) s = s.Substring(0, s.Length - 4).TrimEnd();
+            if (s.Length == 0) return null;
+            return exe ? s + ".exe" : s;
+        }
     }
 
     // ---------------------------------------------------------------- persisted state (learned)
@@ -211,10 +261,20 @@ namespace AX210WatchClaude
         public double LastUploadMbps { get; set; }
         public string DriverHardwareId { get; set; } = "";
 
+        /// The pre-app adapter/DNS/power values were lost (state.json was damaged). The current values are probably the app's
+        /// own, so they're never recorded as "original"; a restore resets to driver/Windows defaults instead.
+        public bool OriginalsUnknown { get; set; }
+        public Dictionary<string, string> OriginalSystem { get; set; } = new Dictionary<string, string>();   // power/QoS values from before Harden
+
         public static State Load()
         {
             try { if (File.Exists(Paths.StateFile)) return Json.S().Deserialize<State>(File.ReadAllText(Paths.StateFile)) ?? new State(); }
-            catch (Exception ex) { Log.Write("ERROR", "state.json unreadable (" + ex.Message + "); starting fresh"); }
+            catch (Exception ex)
+            {
+                try { File.Copy(Paths.StateFile, Paths.StateFile + ".broken", true); } catch { }
+                Log.Write("ERROR", "state.json was damaged (" + ex.Message + "); starting fresh (copy: state.json.broken). Original settings are unknown, so a restore will use driver defaults");
+                return new State { OriginalsUnknown = true, OriginalDnsSaved = true, SetupDone = true };
+            }
             return new State();
         }
         public void Save() { try { Json.WriteAtomic(Paths.StateFile, Json.Pretty(Json.S().Serialize(this))); } catch (Exception ex) { Log.Write("ERROR", "save state: " + ex.Message); } }
@@ -281,12 +341,19 @@ namespace AX210WatchClaude
             return 0;
         }
         static readonly HashSet<int> Ch5 = new HashSet<int>(new[] { 36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 149, 153, 157, 161, 165, 169, 173, 177 });
+        static bool Is6Channel(int ch) { return ch >= 1 && ch <= 233 && ch % 4 == 1; }   // 6 GHz 20 MHz channels: 1, 5, 9 … 233
+        /// Band from a bare channel number, or "?" when the number exists in two bands (6 GHz reuses 1/5/9/13 and 149–177).
+        public static string FromChannel(int ch)
+        {
+            bool b24 = ch >= 1 && ch <= 14, b5 = Ch5.Contains(ch), b6 = Is6Channel(ch);
+            int n = (b24 ? 1 : 0) + (b5 ? 1 : 0) + (b6 ? 1 : 0);
+            if (n != 1) return "?";
+            return b24 ? "2.4" : b5 ? "5" : "6";
+        }
         public static string Guess(string bssid, int ch, Dictionary<string, string> known)
         {
-            string b; if (bssid != null && known != null && known.TryGetValue(bssid, out b)) return b;
-            if (ch >= 1 && ch <= 14) return "2.4";
-            if (Ch5.Contains(ch)) return "5";
-            return "6";
+            string b; if (bssid != null && known != null && known.TryGetValue(bssid, out b) && b != "?") return b;
+            return FromChannel(ch);
         }
     }
 
@@ -329,6 +396,8 @@ namespace AX210WatchClaude
     class WlanClient : IDisposable
     {
         IntPtr h; public Guid Iface; public bool Ok; public string Description = "";
+        /// Band for a BSSID the app has seen before (the watchdog plugs in its learned map).
+        public Func<string, string> BandHint;
         WlanNative.NotificationCallback cb;      // kept alive for the native side
         public event Action<uint, uint> Notification;
 
@@ -407,7 +476,11 @@ namespace AX210WatchClaude
                 if (Query(WlanNative.OpRssi, out rssi)) c.Rssi = rssi;
                 var b = GetBssList().FirstOrDefault(x => x.Bssid == c.Bssid);
                 if (b != null) { c.FreqMHz = b.FreqMHz; c.Band = b.Band; if (c.Channel == 0) c.Channel = b.Channel; }
-                else c.Band = c.Channel <= 14 ? "2.4" : "5";
+                else
+                {
+                    string hint = BandHint == null ? null : BandHint(c.Bssid);
+                    c.Band = !string.IsNullOrEmpty(hint) && hint != "?" ? hint : NetshBand() ?? Bands.FromChannel(c.Channel);
+                }
             }
             return c;
         }
@@ -428,6 +501,19 @@ namespace AX210WatchClaude
             }
             finally { WlanNative.WlanFreeMemory(bl); }
             return r;
+        }
+
+        /// "Band : 6 GHz" from netsh (Windows 11, English UI); null if it can't be read.
+        static string NetshBand()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("netsh.exe", "wlan show interfaces") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+                string text; using (var p = Process.Start(psi)) { text = p.StandardOutput.ReadToEnd(); p.WaitForExit(3000); }
+                var m = Regex.Match(text, @"^\s*Band\s*:\s*([\d.]+)\s*GHz", RegexOptions.Multiline);
+                return m.Success ? (m.Groups[1].Value.StartsWith("2") ? "2.4" : m.Groups[1].Value.StartsWith("5") ? "5" : m.Groups[1].Value.StartsWith("6") ? "6" : null) : null;
+            }
+            catch { return null; }
         }
 
         public uint Scan() { return Ok ? WlanNative.WlanScan(h, ref Iface, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero) : 1; }
@@ -592,6 +678,21 @@ namespace AX210WatchClaude
             foreach (var kv in Supported(props).Where(x => x.Value != null))
                 sb.Append("Set-NetAdapterAdvancedProperty -Name " + Ps.Q(Name) + " -RegistryKeyword " + Ps.Q(kv.Key) + " -RegistryValue " + Ps.Q(kv.Value) + " -NoRestart -ErrorAction Continue;");
             if (restart) sb.Append("Restart-NetAdapter -Name " + Ps.Q(Name) + " -Confirm:$false;");
+            return Ps.Run(sb.ToString(), 120, out output);
+        }
+        /// Puts saved values back. A null value means the keyword had no value of its own before, so it's reset to the driver default
+        /// (skipping it would leave the app's value in place).
+        public static bool Restore(Dictionary<string, string> props, out string output)
+        {
+            var sb = new StringBuilder();
+            foreach (var kv in props)
+            {
+                if (classKey != null && !Has(kv.Key)) continue;
+                if (kv.Value != null) sb.Append("Set-NetAdapterAdvancedProperty -Name " + Ps.Q(Name) + " -RegistryKeyword " + Ps.Q(kv.Key) + " -RegistryValue " + Ps.Q(kv.Value) + " -NoRestart -ErrorAction Continue;");
+                else sb.Append("Reset-NetAdapterAdvancedProperty -Name " + Ps.Q(Name) + " -RegistryKeyword " + Ps.Q(kv.Key) + " -NoRestart -ErrorAction Continue;");
+            }
+            output = ""; if (sb.Length == 0) return true;
+            sb.Append("Restart-NetAdapter -Name " + Ps.Q(Name) + " -Confirm:$false;");
             return Ps.Run(sb.ToString(), 120, out output);
         }
         public static bool Restart() { string o; return Ps.Run("Restart-NetAdapter -Name " + Ps.Q(Name) + " -Confirm:$false", 90, out o); }
@@ -824,6 +925,7 @@ namespace AX210WatchClaude
                                 cur = Bands.Guess(b, ch, knownBands) + "|" + ch;
                                 int[] v; if (!res.TryGetValue(cur, out v)) res[cur] = v = new int[2]; v[0]++; assoc++;
                             }
+                            else cur = null;   // joined some other network: its crashes aren't the home channel's
                         }
                         else if (r.Id == 5002 && cur != null) { res[cur][1]++; crashes++; }
                     }
@@ -1262,7 +1364,7 @@ namespace AX210WatchClaude
         readonly AutoResetEvent nudge = new AutoResetEvent(false);
         public readonly object StLock = new object();
         readonly DateTime started = DateTime.Now;
-        DateTime lastSample, lastProfileCheck = DateTime.MinValue, lastUdp, lastSave, lastTick, lastPrune, lastProbeCheck, resumeGrace;
+        DateTime lastBandLearn, lastSample, lastProfileCheck = DateTime.MinValue, lastUdp, lastSave, lastTick, lastPrune, lastProbeCheck, resumeGrace;
         DateTime? downSince; int ladder; bool deferNotified, ispNoted;
         string lastConnDesc = "", lastKey = "";
         readonly Dictionary<string, DateTime> lastNote = new Dictionary<string, DateTime>();
@@ -1276,6 +1378,7 @@ namespace AX210WatchClaude
             Cfg = Config.Load(); St = State.Load();
             IsAdmin = ReadOnly || new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
             Wlan = new WlanClient();
+            Wlan.BandHint = b => { string v; lock (StLock) return b != null && St.KnownBands.TryGetValue(b, out v) ? v : null; };
             Adapter.Init(Wlan.Iface);
             DriverVersion = Adapter.DriverVersion();
         }
@@ -1289,7 +1392,7 @@ namespace AX210WatchClaude
             else if (Adapter.Found && !Adapter.Supports6) Log.Write("INFO", "This adapter has no 6 GHz; using 5 and 2.4 GHz only");
             Detector.Discover(Cfg);
             Log.Write("INFO", "Game detection: watching " + Detector.RootCount + " game folders and " + Cfg.GameProcesses.Count + " known game names");
-            if (St.OriginalProps.Count == 0 && Adapter.Found) { St.OriginalProps = Adapter.Read(Profiles.AllKeys); Log.Write("INFO", "Backed up the original adapter settings"); }
+            if (St.OriginalProps.Count == 0 && Adapter.Found && !St.OriginalsUnknown) { St.OriginalProps = Adapter.Read(Profiles.AllKeys); Log.Write("INFO", "Backed up the original adapter settings"); }
             if (!St.OriginalDnsSaved) { St.OriginalDns = DnsTools.ReadStatic(); St.OriginalDnsSaved = true; }
             if (!string.IsNullOrEmpty(St.LastDriverVersion) && St.LastDriverVersion != DriverVersion)
             {
@@ -1334,7 +1437,7 @@ namespace AX210WatchClaude
         public string ApName(string bssid) { return string.IsNullOrEmpty(bssid) ? "—" : IsAvoidBssid(bssid) ? "Extender" : "Router"; }
         public string Describe(ConnInfo c) { return c == null || !c.Connected ? "disconnected" : string.Format("{0} {1} GHz ch {2} ({3} dBm)", ApName(c.Bssid), c.Band, c.Channel, c.Rssi); }
         public string Describe(Bss b) { return string.Format("{0} {1} GHz ch {2} ({3} dBm, {4})", ApName(b.Bssid), b.Band, b.Channel, b.Rssi, b.Bssid); }
-        public static string KeyLabel(string key) { var p = key.Split('|'); return p.Length == 2 ? p[0] + " GHz ch " + p[1] : key; }
+        public static string KeyLabel(string key) { var p = key.Split('|'); return p.Length != 2 ? key : p[0] == "?" ? "ch " + p[1] + " (band unknown)" : p[0] + " GHz ch " + p[1]; }
         public int CrashCount(int hours) { lock (StLock) return St.Incidents.Count(i => i.Kind == "crash" && i.Time > DateTime.UtcNow.AddHours(-hours)); }
         ChannelStat Stat(string key) { ChannelStat s; if (!St.Channels.TryGetValue(key, out s)) St.Channels[key] = s = new ChannelStat(); return s; }
         void UpdateGame()
@@ -1383,7 +1486,7 @@ namespace AX210WatchClaude
         }
         string PolicyName(string exe, string key)
         {
-            var name = "AX210_WatchClaude_" + Regex.Replace(Path.GetFileNameWithoutExtension(exe), "[^A-Za-z0-9_.-]", "");
+            var name = "AX210_WatchClaude_" + Regex.Replace(Names.CleanProgram(exe, false) ?? "game", "[^A-Za-z0-9_.-]", "");
             lock (StLock) if (St.GameQos.Any(kv => kv.Value == name && kv.Key != key)) name += "_" + (key.GetHashCode() & 0xFFFF).ToString("x4");
             return name;
         }
@@ -1392,7 +1495,7 @@ namespace AX210WatchClaude
             var q = new StringBuilder("Remove-NetQosPolicy -Name 'AX210_WatchClaude_Game' -Confirm:$false -ErrorAction SilentlyContinue\r\n");   // v1 policy (all protocols)
             if (!Cfg.QosTagGame)
             {
-                q.Append("Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'AX210_WatchClaude_*' } | Remove-NetQosPolicy -Confirm:$false\r\n$r+='game traffic priority: off'");
+                q.Append("Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'AX210_WatchClaude_*' -and $_.Name -ne 'AX210_WatchClaude_UploadCap' } | Remove-NetQosPolicy -Confirm:$false\r\n$r+='game traffic priority: off'");
                 lock (StLock) { St.GameQos.Clear(); foreach (var g in St.Games.Values) g.Prioritized = false; }
                 return q.ToString();
             }
@@ -1404,7 +1507,7 @@ namespace AX210WatchClaude
                     q.Append("Remove-NetQosPolicy -Name " + Ps.Q(kv.Value) + " -Confirm:$false -ErrorAction SilentlyContinue\r\n");
                     St.GameQos.Remove(kv.Key); GameRec g; if (St.Games.TryGetValue(kv.Key, out g)) g.Prioritized = false;
                 }
-            q.Append("$r+=('game traffic priority: ' + @(Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'AX210_WatchClaude_*' }).Count + ' policies (UDP only)')");
+            q.Append("$r+=('game traffic priority: ' + @(Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'AX210_WatchClaude_*' -and $_.Name -ne 'AX210_WatchClaude_UploadCap' }).Count + ' policies (UDP only)')");
             return q.ToString();
         }
         static int PingOnce(string host, int timeout) { try { using (var p = new Ping()) { var r = p.Send(host, timeout); return r.Status == IPStatus.Success ? (int)r.RoundtripTime : -1; } } catch { return -1; } }
@@ -1431,9 +1534,10 @@ namespace AX210WatchClaude
                 UpdateGame();
                 if (c.Connected)
                 {
-                    if (string.IsNullOrEmpty(Cfg.HomeSsid) && !string.IsNullOrEmpty(c.Ssid)) { Cfg.HomeSsid = c.Ssid; Cfg.Save(); Log.Write("INFO", "Home network learned: " + c.Ssid); }
+                    if (string.IsNullOrEmpty(Cfg.HomeSsid) && !string.IsNullOrEmpty(c.Ssid)) { Cfg.HomeSsid = c.Ssid; Cfg.Save(false); Log.Write("INFO", "Home network learned: " + c.Ssid); }
                     if (c.Ssid == Cfg.HomeSsid && !string.IsNullOrEmpty(c.Profile)) St.HomeProfile = c.Profile;
-                    lock (StLock) { if (!string.IsNullOrEmpty(c.Bssid) && c.Band != "") St.KnownBands[c.Bssid] = c.Band; if (c.Band == "6" && !IsAvoidBssid(c.Bssid)) St.Router6Bssid = c.Bssid; }
+                    if ((now - lastBandLearn).TotalSeconds >= 60) { lastBandLearn = now; foreach (var b in Wlan.GetBssList().Where(x => x.Ssid == c.Ssid && x.Band != "?")) lock (StLock) St.KnownBands[b.Bssid] = b.Band; }   // exact, from frequency
+                    lock (StLock) { if (!string.IsNullOrEmpty(c.Bssid) && c.Band != "" && c.Band != "?") St.KnownBands[c.Bssid] = c.Band; if (c.Band == "6" && !IsAvoidBssid(c.Bssid)) St.Router6Bssid = c.Bssid; }
                     var desc = Describe(c);
                     if (desc != lastConnDesc && c.Key != lastKey) { Log.Write("CONN", "Connected: " + desc + string.Format(", link {0}/{1} Mbps", c.RxMbps, c.TxMbps)); lastKey = c.Key; }
                     lastConnDesc = desc;
@@ -1540,7 +1644,12 @@ namespace AX210WatchClaude
             {
                 lastProfileCheck = now;
                 var drift = ProfileDrift(St.CurrentMode);
-                if (drift.Count > 0) { RunAction("Re-applying settings", () => ApplyMode(St.CurrentMode, "settings drifted: " + string.Join(", ", drift), drift.Any(d => Profiles.ModeKeys.Contains(d)))); return; }
+                if (drift.Count > 0)
+                {
+                    var why = "settings drifted: " + string.Join(", ", drift);
+                    RunAction("Re-applying settings", () => { if (Adapter.CanLockBands) ApplyMode(St.CurrentMode, why, drift.Any(d => Profiles.ModeKeys.Contains(d))); else ApplyBaseProfile(why); });
+                    return;
+                }
             }
             var pref = PreferredBand();
             if (Adapter.CanLockBands && Profiles.BandOf(St.CurrentMode) != pref && !St.TurboActive && (now - lastProbeCheck).TotalMinutes >= 5)
@@ -1563,7 +1672,8 @@ namespace AX210WatchClaude
 
         List<string> ProfileDrift(string mode)
         {
-            var target = Profiles.Target(mode); var cur = Adapter.Read(target.Keys);
+            var target = Adapter.CanLockBands ? Profiles.Target(mode) : new Dictionary<string, string>(Profiles.Base);
+            var cur = Adapter.Read(target.Keys);
             return target.Where(kv => cur.ContainsKey(kv.Key) && cur[kv.Key] != null && cur[kv.Key] != kv.Value).Select(kv => kv.Key).ToList();
         }
 
@@ -1643,7 +1753,7 @@ namespace AX210WatchClaude
             }
             Log.Write("ACTION", Profiles.Name(mode) + " didn't work out (" + why + "); rolling back");
             lock (StLock) St.ModeFailedUntil[band] = DateTime.UtcNow.AddHours(Cfg.ProbePreferredHours);
-            Adapter.Apply(before.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value), true, out o);
+            Adapter.Restore(before, out o);
             string w2; WaitForBand(Profiles.BandOf(St.CurrentMode), 60, out w2);
             Save();
             if (notify) Note("switchfail", "Stayed on " + Profiles.Name(St.CurrentMode), band + " GHz wasn't usable: " + why + ".", ToolTipIcon.Warning, 0);
@@ -1706,11 +1816,11 @@ namespace AX210WatchClaude
         {
             var lkg = St.LastKnownGood.Count > 0 ? St.LastKnownGood : St.OriginalProps;
             var cur = Adapter.Read(lkg.Keys);
-            var diff = lkg.Where(kv => kv.Value != null && cur.ContainsKey(kv.Key) && cur[kv.Key] != kv.Value).ToDictionary(kv => kv.Key, kv => kv.Value);
+            var diff = lkg.Where(kv => cur.ContainsKey(kv.Key) && cur[kv.Key] != kv.Value).ToDictionary(kv => kv.Key, kv => kv.Value);
             string o;
             if (diff.Count == 0) { Log.Write("ACTION", "Recovery 4/4: settings already last-known-good; restarting the adapter once more"); Adapter.Restart(); return; }
             Log.Write("ACTION", "Recovery 4/4: rolling back to last-known-good settings (" + string.Join(", ", diff.Keys) + ")");
-            Adapter.Apply(diff, true, out o);
+            Adapter.Restore(diff, out o);
             St.CurrentMode = Profiles.InferMode(Adapter.Read(Profiles.ModeKeys)); Save();
             Note("rollback", "Rolled back Wi-Fi settings", "Restored the last setup that worked.", ToolTipIcon.Warning, 0);
         }
@@ -1791,6 +1901,53 @@ namespace AX210WatchClaude
         /// Power settings + device power management + optional QoS tag for the game. Idempotent.
         public void Harden()
         {
+            try { HardenCore(); } catch (Exception ex) { Log.Write("ERROR", "system settings: " + ex.Message); }
+        }
+        const string SubWifi = "19cbb8fa-5279-450e-9fac-8a3d5fedd0c1", SetWifi = "12bbebe6-58d6-4636-95bb-3217ef867c1a", SubPcie = "501a4d13-42af-4429-9fd1-a8218c268e20", SetAspm = "ee12f906-d277-404b-b6da-e5fa1a576df5";
+
+        /// Once, before the first change: the power plan values, the adapter's "allow turning off" and the QoS NLA value.
+        void CaptureSystemOriginals()
+        {
+            lock (StLock) if (St.OriginalSystem.Count > 0 || St.OriginalsUnknown) return;
+            string so, se;
+            Ps.Run((@"
+$o=[ordered]@{}
+$o.scheme=((powercfg /getactivescheme) -replace '.*:\s*([0-9a-fA-F-]{36}).*','$1').Trim()
+function Q($sub,$set){ $t = powercfg /query $o.scheme $sub $set; @(((($t | Select-String 'Current AC Power Setting Index') -replace '.*:\s*','') -join '').Trim(), ((($t | Select-String 'Current DC Power Setting Index') -replace '.*:\s*','') -join '').Trim()) }
+$w = Q '%SW%' '%TW%'; $o.wifiAC=$w[0]; $o.wifiDC=$w[1]
+$p = Q '%SP%' '%TP%'; $o.aspmAC=$p[0]
+$pnp=(Get-NetAdapter -Name %NAME%).PnPDeviceID
+$o.devpower=((@(Get-CimInstance -Namespace root\wmi -ClassName MSPower_DeviceEnable -ErrorAction SilentlyContinue | Where-Object { $_.InstanceName.StartsWith($pnp,[StringComparison]::OrdinalIgnoreCase) }) | ForEach-Object { [string]$_.Enable }) -join ',')
+$v=(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\QoS' -Name 'Do not use NLA' -ErrorAction SilentlyContinue).'Do not use NLA'; $o.nla=if ($v -eq $null) { '(none)' } else { [string]$v }
+$o.Keys | ForEach-Object { $_ + '=' + $o[$_] }").Replace("%SW%", SubWifi).Replace("%TW%", SetWifi).Replace("%SP%", SubPcie).Replace("%TP%", SetAspm).Replace("%NAME%", Ps.Q(Adapter.Name)), 60, out so, out se);
+            var d = new Dictionary<string, string>();
+            foreach (var l in (so ?? "").Split('\n').Select(x => x.Trim()).Where(x => x.Contains("="))) d[l.Substring(0, l.IndexOf('='))] = l.Substring(l.IndexOf('=') + 1);
+            string ac; if (!d.TryGetValue("wifiAC", out ac) || !Regex.IsMatch(ac, "^0x[0-9a-fA-F]+$")) return;   // couldn't read (non-English powercfg): leave power settings out of restores
+            lock (StLock) St.OriginalSystem = d; Save(); Log.Write("INFO", "Backed up the original power settings");
+        }
+
+        /// Undoes Harden: power plan values, "allow the computer to turn off this device", and the QoS NLA value.
+        string RestoreSystemOriginals()
+        {
+            Dictionary<string, string> d; lock (StLock) d = new Dictionary<string, string>(St.OriginalSystem); if (d.Count == 0) return "";
+            Func<string, string> Num = k => { string v; if (!d.TryGetValue(k, out v) || !Regex.IsMatch(v ?? "", "^0x[0-9a-fA-F]+$")) return null; return Convert.ToInt64(v.Substring(2), 16).ToString(); };
+            string scheme; d.TryGetValue("scheme", out scheme); if (!Regex.IsMatch(scheme ?? "", "^[0-9a-fA-F-]{36}$")) scheme = "SCHEME_CURRENT";
+            var sb = new StringBuilder();
+            if (Num("wifiAC") != null) sb.AppendLine("powercfg /setacvalueindex " + scheme + " " + SubWifi + " " + SetWifi + " " + Num("wifiAC") + " | Out-Null");
+            if (Num("wifiDC") != null) sb.AppendLine("powercfg /setdcvalueindex " + scheme + " " + SubWifi + " " + SetWifi + " " + Num("wifiDC") + " | Out-Null");
+            if (Num("aspmAC") != null) sb.AppendLine("powercfg /setacvalueindex " + scheme + " " + SubPcie + " " + SetAspm + " " + Num("aspmAC") + " | Out-Null");
+            sb.AppendLine("powercfg /setactive SCHEME_CURRENT | Out-Null");
+            string dp; if (d.TryGetValue("devpower", out dp) && dp.IndexOf("True", StringComparison.OrdinalIgnoreCase) >= 0)
+                sb.AppendLine("$pnp=(Get-NetAdapter -Name " + Ps.Q(Adapter.Name) + ").PnPDeviceID; Get-CimInstance -Namespace root\\wmi -ClassName MSPower_DeviceEnable -ErrorAction SilentlyContinue | Where-Object { $_.InstanceName.StartsWith($pnp,[StringComparison]::OrdinalIgnoreCase) -and -not $_.Enable } | ForEach-Object { $_ | Set-CimInstance -Property @{Enable=$true} }");
+            string nla; if (d.TryGetValue("nla", out nla) && nla == "(none)") sb.AppendLine("Remove-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\QoS' -Name 'Do not use NLA' -ErrorAction SilentlyContinue");
+            string o; bool ok = Ps.Run(sb.ToString(), 60, out o);
+            Log.Write("ACTION", ok ? "Restored the original power settings" : "Couldn't fully restore the power settings: " + o);
+            return ok ? "Power settings restored." : "Power settings partly restored.";
+        }
+
+        void HardenCore()
+        {
+            CaptureSystemOriginals();
             var s = @"
 $r=@()
 powercfg /setacvalueindex SCHEME_CURRENT 19cbb8fa-5279-450e-9fac-8a3d5fedd0c1 12bbebe6-58d6-4636-95bb-3217ef867c1a 0 | Out-Null
@@ -1823,7 +1980,9 @@ $r -join '; '";
             lock (StLock) St.TurboActive = false;
             RestoreWifiDirect("restoring original settings");
             var sb = new StringBuilder(); string o;
-            if (St.OriginalProps.Count > 0) { Adapter.Apply(St.OriginalProps.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value), true, out o); sb.AppendLine("Adapter settings restored."); }
+            if (St.OriginalProps.Count > 0) { Adapter.Restore(St.OriginalProps, out o); sb.AppendLine("Adapter settings restored."); }
+            else if (St.OriginalsUnknown) { Adapter.Restore(Profiles.AllKeys.ToDictionary(k => k, k => (string)null), out o); sb.AppendLine("Adapter settings reset to the driver's defaults (the originals were lost)."); }
+            var ps = RestoreSystemOriginals(); if (ps != "") sb.AppendLine(ps);
             var dns = St.OriginalDns.Count > 0 ? "Set-DnsClientServerAddress -InterfaceIndex " + Adapter.IfIndex() + " -ServerAddresses @(" + string.Join(",", St.OriginalDns.Select(Ps.Q)) + ")" : "Set-DnsClientServerAddress -InterfaceIndex " + Adapter.IfIndex() + " -ResetServerAddresses";
             Ps.Run(dns + "; Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'AX210_WatchClaude*' } | Remove-NetQosPolicy -Confirm:$false", 60, out o);
             lock (StLock) { St.GameQos.Clear(); foreach (var g in St.Games.Values) g.Prioritized = false; }
@@ -1834,9 +1993,23 @@ $r -join '; '";
             return sb.ToString();
         }
 
+        /// Tuned base profile without band keys (adapters that can't lock bands).
+        public bool ApplyBaseProfile(string reason)
+        {
+            if (!CanAct || !Adapter.Found) return false;
+            var target = Adapter.Supported(Profiles.Base); if (target.Count == 0) return false;
+            Log.Write("ACTION", "Applying the tuned adapter settings: " + reason);
+            string o; bool ok = Adapter.Apply(target, true, out o); if (!string.IsNullOrWhiteSpace(o)) Log.Write("DEBUG", o);
+            var sw = Stopwatch.StartNew(); while (sw.Elapsed.TotalSeconds < 45 && !Wlan.GetConnection().Connected) Thread.Sleep(2000);
+            lock (StLock) St.LastKnownGood = Adapter.Read(Profiles.AllKeys); Save();
+            Log.Write("ACTION", ok ? "Tuned adapter settings applied" : "Some adapter settings couldn't be applied: " + o);
+            return ok;
+        }
+
         public string Reapply()
         {
             Cfg.AutoActions = true; Cfg.Save(); Harden();
+            if (!Adapter.CanLockBands) return ApplyBaseProfile("re-applying optimized settings") ? "Optimized adapter settings applied (this adapter doesn't support band locking)." : "Couldn't apply the adapter settings. See the event list.";
             var mode = string.IsNullOrEmpty(St.CurrentMode) ? PreferredBand() : St.CurrentMode;
             bool ok = ApplyMode(mode, "re-applying optimized settings", true);
             return ok ? "Optimized settings applied; now on " + Describe(Wlan.GetConnection()) + "." : "Couldn't apply " + Profiles.Name(mode) + "; rolled back. See the event list.";
@@ -1969,20 +2142,23 @@ $r -join '; '";
             m.Items.Add("Settings…", null, (s, e) => ShowSettings());
             m.Items.Add("Setup assistant…", null, (s, e) => ShowSetup());
             m.Items.Add(new ToolStripSeparator());
-            m.Items.Add("Exit (until next sign-in)", null, (s, e) => ExitApp("Exited from the tray menu"));
+            m.Items.Add("Exit (until next sign-in)", null, (s, e) => ExitApp("Exited from the tray menu", true));
             ni.ContextMenuStrip = m;
             ni.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) ShowStatus(); };
             wd.Notify += (t, msg, icon) => OnUi(() => { if (wd.Cfg.Notifications) ni.ShowBalloonTip(6000, t, msg, icon); });
             wd.Updated += () => OnUi(UpdateIcon);
             if (!wd.IsAdmin) ni.ShowBalloonTip(8000, "AX210_WatchClaude: monitor only", "Not running as administrator, so it can watch but not fix. Start it from the Start menu shortcut.", ToolTipIcon.Warning);
-            Single.Listen(() => OnUi(() => { if (!wd.St.SetupDone && wd.Wlan.Ok) ShowSetup(); else ShowStatus(); }), () => OnUi(() => ExitApp("Stopped by the installer")));
+            Single.Listen(() => OnUi(() => { if (!wd.St.SetupDone && wd.Wlan.Ok) ShowSetup(); else ShowStatus(); }), () => OnUi(() => ExitApp("Stopped by the installer", false)));
+            if (Config.Broken) ni.ShowBalloonTip(15000, "config.json has a mistake", "Running on default settings until it's fixed. Your file wasn't changed (a copy is in config.json.broken). Fix it and use Settings → Reload from file, or save new settings.", ToolTipIcon.Warning);
             var t0 = new System.Windows.Forms.Timer { Interval = 2500 };
             t0.Tick += (s, e) => { t0.Stop(); t0.Dispose(); if (!wd.St.SetupDone && wd.Wlan.Ok) ShowSetup(); else if (showWindow) ShowStatus(); };
             t0.Start();
         }
-        void ExitApp(string why)
+        /// userExit: the tray's Exit, which keeps it off until the next sign-in. The installer's stop isn't one: the new
+        /// version must be able to start right away.
+        void ExitApp(string why, bool userExit)
         {
-            ni.Visible = false; ExitFlag.Set(); wd.RestoreWifiDirect("app exited"); wd.Save(); Log.Write("START", why); ExitThread();
+            ni.Visible = false; if (userExit) ExitFlag.Set(); wd.RestoreWifiDirect("app exited"); wd.Save(); Log.Write("START", why); ExitThread();
         }
         void OnUi(Action a) { try { if (ui.IsHandleCreated) ui.BeginInvoke(a); } catch { } }
         internal static Icon MakeIcon(Color c, int size = 32) { return Brand.StatusIcon(size, c); }
@@ -2057,7 +2233,8 @@ $r -join '; '";
         public static readonly string Version = typeof(Program).Assembly.GetName().Version.ToString(3);
 
         //  (no args)          what the shortcuts run: show the window, starting the app through its scheduled task if needed (no UAC prompt)
-        //  --tray             what the scheduled task runs: start quietly in the tray (respects "Exit until next sign-in")
+        //  --tray             what the scheduled task runs: start quietly in the tray, in place (respects "Exit until next sign-in")
+        //  --background       like no args, but doesn't open a window (the installer's silent mode)
         //  --register-task [--autostart] | --unregister-task | --stop | --restore-original | --cleanup    installer hooks
         //  --selftest <file> [--dns] [--checkup] | --render <png> [view] [--redact]                          diagnostics
         [STAThread]
@@ -2071,15 +2248,18 @@ $r -join '; '";
             if (args.Contains("--restore-original")) { Setup.RestoreOriginal(); return; }
             if (args.Contains("--cleanup")) { Setup.Cleanup(); return; }
 
-            bool tray = args.Contains("--tray");
-            if (tray && ExitFlag.ExitedThisBoot()) return;   // user chose Exit this session; the 5-minute self-restart respects that
-            if (Single.IsRunning()) { if (!tray) Single.SignalShow(); return; }
+            bool tray = args.Contains("--tray"), background = args.Contains("--background");
+            if (tray && ExitFlag.ExitedThisSession()) return;   // user chose Exit this sign-in; the 5-minute self-restart respects that
+            if (Single.IsRunning()) { if (!tray && !background) Single.SignalShow(); return; }
             bool admin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
             if (!tray) ExitFlag.Clear();
-            if (!admin && !args.Contains("--monitor-only"))
+            // --tray is the task itself: it runs in place, never relaunches (on a standard account the task's token isn't
+            // elevated, and relaunching through the already-running task would just exit) -> monitor-only there.
+            if (!admin && !tray && !args.Contains("--monitor-only"))
             {
-                if (Setup.RunTask()) { if (!tray) Single.WaitAndSignalShow(25000); return; }   // starts elevated with no prompt
-                try { Process.Start(new ProcessStartInfo(Application.ExecutablePath, tray ? "--tray" : "") { UseShellExecute = true, Verb = "runas" }); return; }
+                if (Setup.RunTask()) { if (!background) Single.WaitAndSignalShow(25000); return; }   // starts elevated with no prompt
+                if (background) return;
+                try { Process.Start(new ProcessStartInfo(Application.ExecutablePath, "") { UseShellExecute = true, Verb = "runas" }); return; }
                 catch { /* UAC declined: fall through to monitor-only */ }
             }
             bool created;
@@ -2092,7 +2272,7 @@ $r -join '; '";
                 AppDomain.CurrentDomain.UnhandledException += (s, e) => Log.Write("ERROR", "Unhandled: " + e.ExceptionObject);
                 Application.ThreadException += (s, e) => Log.Write("ERROR", "UI: " + e.Exception);
                 var wd = new Watchdog(); wd.Start();
-                Application.Run(new TrayApp(wd, !tray));
+                Application.Run(new TrayApp(wd, !tray && !background));
                 wd.Save();
             }
         }

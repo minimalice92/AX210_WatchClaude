@@ -223,7 +223,6 @@ namespace AX210WatchClaude
         public SettingsForm(Watchdog w, Action<string> saved)
         {
             wd = w; onSaved = saved; Ui.InitFonts(); T = Theme.Current();
-            if (Ui.S < 1f) using (var g0 = CreateGraphics()) Ui.S = g0.DpiX / 96f;
             Text = "AX210_WatchClaude — Settings"; BackColor = T.Bg; ForeColor = T.Text; Font = Ui.Body; AutoScaleMode = AutoScaleMode.None; DoubleBuffered = true;
             StartPosition = FormStartPosition.CenterScreen; Icon = Brand.AppIcon(); MaximizeBox = false;
             int cardW = Ui.D(720);
@@ -376,8 +375,9 @@ namespace AX210WatchClaude
             n.AvoidBssids = bs.Distinct().ToList();
             n.LowLatencyMode = tLowLat.Checked; n.EnforceAdapterProfile = tEnforce.Checked;
             n.QosTagGame = tQos.Checked; n.SuspendWifiDirectWhileGaming = tWfd.Checked; n.SessionReports = tReports.Checked; n.BandwidthGuard = tGuard.Checked;
-            n.QosAlwaysExes = Lines(fQosExes).Select(x => x.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? x : x + ".exe").Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            n.GameProcesses = Lines(fGames).Select(x => x.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? x.Substring(0, x.Length - 4) : x).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            // accepts names, file names or full paths (quoted or not, e.g. from "Copy as path"); keeps just the program name
+            n.QosAlwaysExes = Lines(fQosExes).Select(x => Names.CleanProgram(x, true)).Where(x => x != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            n.GameProcesses = Lines(fGames).Select(x => Names.CleanProgram(x, false)).Where(x => x != null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             n.ExtraGameFolders = Lines(fExtra).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             n.IgnoreGameFolders = Lines(fIgnore).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             n.AutoDns = tDns.Checked; n.UploadLimiter = tUpload.Checked; n.TurboDownloads = tTurbo.Checked;
