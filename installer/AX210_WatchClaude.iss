@@ -5,6 +5,9 @@
 #ifndef AppVersion
   #define AppVersion "1.0.0"
 #endif
+#ifndef AppFileVersion
+  #define AppFileVersion "1.0.0.0"
+#endif
 #define AppName "AX210_WatchClaude"
 #define AppExe "AX210_WatchClaude.exe"
 #define AppUrl "https://github.com/minimalice92/AX210_WatchClaude"
@@ -19,7 +22,7 @@ AppPublisherURL={#AppUrl}
 AppSupportURL={#AppUrl}/issues
 AppUpdatesURL={#AppUrl}/releases
 AppComments=Wi-Fi watchdog for Intel AX210 cards: keeps gaming connections steady.
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#AppFileVersion}
 VersionInfoDescription={#AppName} Setup
 DefaultDirName={autopf}\{#AppName}
 ; one page: the options, then Install (a different folder can still be chosen with /DIR=)

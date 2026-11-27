@@ -32,12 +32,13 @@ namespace AX210WatchClaude
         public double GwMed { get; set; } public double GwP95 { get; set; } public double GwMax { get; set; } public double GwLossPct { get; set; }
         public double NetMed { get; set; } public double NetP95 { get; set; } public double NetLossPct { get; set; }
         public int Stalls { get; set; } public int Crashes { get; set; } public string Where { get; set; }
+        public bool Streaming { get; set; } public string Bluetooth { get; set; }   // 1.0.3: a streaming/VR session; Bluetooth devices connected during it
     }
-    public class DriverStat { public double Hours { get; set; } public int Crashes { get; set; } public DateTime FirstSeen { get; set; } public bool BackedUp { get; set; } }
+    public class DriverStat { public double Hours { get; set; } public int Crashes { get; set; } public DateTime FirstSeen { get; set; } public bool BackedUp { get; set; } public bool ViaWindowsUpdate { get; set; } }
 
     public class GameSession
     {
-        public string Game; public DateTime Start = DateTime.Now, LastSample = DateTime.Now; public bool PreChecked;
+        public string Game; public DateTime Start = DateTime.Now, LastSample = DateTime.Now; public bool PreChecked, Streaming; public string Bluetooth = "";
         public readonly List<double> Gw = new List<double>(), Net = new List<double>(); public int GwN, GwLost, NetN, NetLost, Stalls;
         public readonly Dictionary<string, double> Where = new Dictionary<string, double>();
     }
@@ -161,7 +162,7 @@ namespace AX210WatchClaude
 
         void FeaturesStart()
         {
-            lock (StLock) { if (!St.DriverStats.ContainsKey(DriverVersion)) St.DriverStats[DriverVersion] = new DriverStat { FirstSeen = DateTime.UtcNow }; }
+            lock (StLock) { if (DriverVersion != "?" && Adapter.IsIntel && !St.DriverStats.ContainsKey(DriverVersion)) St.DriverStats[DriverVersion] = new DriverStat { FirstSeen = DateTime.UtcNow }; }
             if (CanAct)
             {
                 if (St.WifiDirectDisabled.Count > 0) ThreadPool.QueueUserWorkItem(_ => RestoreWifiDirect("left paused by the previous run"));
@@ -204,11 +205,15 @@ namespace AX210WatchClaude
         }
 
         // ---------- games: start / end
-        void OnGameStarted(string game)
+        void OnGameStarted(string game, bool streaming)
         {
-            session = new GameSession { Game = game };
+            session = new GameSession { Game = game, Streaming = streaming };
             int gen = Interlocked.Increment(ref wfdGen);
-            if (Cfg.SuspendWifiDirectWhileGaming && MayChange) ThreadPool.QueueUserWorkItem(_ => SuspendWifiDirect(gen));
+            // Streaming/VR: no Wi-Fi Direct pause. Quest users often stream through Windows' Mobile Hotspot, and wireless
+            // displays use Wi-Fi Direct too; pausing it would cut them off.
+            if (Cfg.SuspendWifiDirectWhileGaming && MayChange && !streaming && WiredName == null) ThreadPool.QueueUserWorkItem(_ => SuspendWifiDirect(gen));
+            ThreadPool.QueueUserWorkItem(_ => BatteryGameBoost(true, gen));
+            MeshHoldStart();
         }
 
         void OnGameEnded(string game)
@@ -216,6 +221,8 @@ namespace AX210WatchClaude
             var ses = session; session = null;
             int gen = Interlocked.Increment(ref wfdGen);
             if (CanAct) ThreadPool.QueueUserWorkItem(_ => RestoreWifiDirect(game + " closed", gen));   // always queued: a pause may still be in flight
+            ThreadPool.QueueUserWorkItem(_ => BatteryGameBoost(false, gen));
+            MeshHoldEnd();
             if (ses == null) return;
             double mins = (DateTime.Now - ses.Start).TotalMinutes; if (mins < 2) return;
             SessionRec rec; string where;
@@ -229,7 +236,7 @@ namespace AX210WatchClaude
                     GwMed = PingMonitor.Pct(ses.Gw, 50), GwP95 = PingMonitor.Pct(ses.Gw, 95), GwMax = ses.Gw.Count > 0 ? ses.Gw[ses.Gw.Count - 1] : 0,
                     GwLossPct = ses.GwN == 0 ? 0 : Math.Round(100.0 * ses.GwLost / ses.GwN, 2),
                     NetMed = PingMonitor.Pct(ses.Net, 50), NetP95 = PingMonitor.Pct(ses.Net, 95), NetLossPct = ses.NetN == 0 ? 0 : Math.Round(100.0 * ses.NetLost / ses.NetN, 2),
-                    Stalls = ses.Stalls, Where = where
+                    Stalls = ses.Stalls, Where = where, Streaming = ses.Streaming, Bluetooth = ses.Bluetooth ?? ""
                 };
             }
             lock (StLock)
@@ -241,6 +248,7 @@ namespace AX210WatchClaude
             bool clean = rec.Crashes == 0 && rec.GwLossPct < 0.5 && rec.NetLossPct < 1 && rec.GwP95 < 20;
             var text = string.Format("{0:0} min · router {1:0}/{2:0}/{3:0} ms (median/p95/max) · internet {4:0}/{5:0} ms · loss {6:0.#}% · {7} stall{8} · {9} driver crash{10} · {11}",
                 rec.Minutes, rec.GwMed, rec.GwP95, rec.GwMax, rec.NetMed, rec.NetP95, Math.Max(rec.GwLossPct, rec.NetLossPct), rec.Stalls, rec.Stalls == 1 ? "" : "s", rec.Crashes, rec.Crashes == 1 ? "" : "es", where);
+            if (!clean && rec.Bluetooth != "") text += " · Bluetooth was connected (" + rec.Bluetooth + "): it shares the Wi-Fi card's antenna, so it can cause lag";
             Log.Write("SESSION", ses.Game + ": " + text);
             try
             {
@@ -263,8 +271,11 @@ namespace AX210WatchClaude
                 else if (c.Band != PreferredBand() && !St.TurboActive) issues.Add("Wi-Fi is on the " + c.Band + " GHz fallback");
             }
             if (p.GwP95 > 30 || p.GwLossPct > 1) issues.Add(string.Format("router ping is unstable ({0:0} ms p95, {1:0.#}% loss)", p.GwP95, p.GwLossPct));
-            if (RxMbps > Cfg.GuardRxMbps) issues.Add(string.Format("something is downloading at ~{0:0} Mbps", RxMbps));
-            if (TxMbps > Cfg.GuardTxMbps) issues.Add(string.Format("something is uploading at ~{0:0} Mbps", TxMbps));
+            if (!ses.Streaming && RxMbps > Cfg.GuardRxMbps) issues.Add(string.Format("something is downloading at ~{0:0} Mbps", RxMbps));   // a stream is that traffic itself
+            if (!ses.Streaming && TxMbps > Cfg.GuardTxMbps) issues.Add(string.Format("something is uploading at ~{0:0} Mbps", TxMbps));
+            var bt = Bt.Connected(); lock (ses) ses.Bluetooth = bt;
+            if (bt != "" && c.Connected && c.Band == "2.4") issues.Add("Bluetooth (" + bt + ") is connected while Wi-Fi is on 2.4 GHz, the band Bluetooth uses too");
+            MeshPreGame(c);   // moves to a clearly stronger node on its own, with its own notice
             if (CrashCount(1) > 0) issues.Add("the Wi-Fi driver crashed in the last hour");
             if (UdpInUse >= Cfg.UdpWarnThreshold) issues.Add("network ports are running low");
             if (issues.Count == 0) { Log.Write("GAME", string.Format("Pre-game check for {0}: all clear ({1}, router {2:0}/{3:0} ms)", ses.Game, Describe(c), p.GwP50, p.GwP95)); return; }
@@ -313,7 +324,8 @@ namespace AX210WatchClaude
         // ---------- bandwidth guard
         void BandwidthGuard(DateTime now)
         {
-            if (!InGame || !Cfg.BandwidthGuard || Busy != "" || St.TurboActive) { if (heavySince != null && heavySince < now) heavySince = null; return; }
+            var ses0 = session;
+            if (!InGame || !Cfg.BandwidthGuard || Busy != "" || St.TurboActive || (ses0 != null && ses0.Streaming)) { if (heavySince != null && heavySince < now) heavySince = null; return; }
             bool heavy = RxMbps > Cfg.GuardRxMbps || TxMbps > Cfg.GuardTxMbps;
             if (!heavy) { if (heavySince != null && heavySince < now) heavySince = null; return; }
             if (heavySince == null) { heavySince = now; return; }
@@ -355,8 +367,11 @@ namespace AX210WatchClaude
 
         // ---------- driver scorecard, backup, rollback
         void DriverCrashCounted() { lock (StLock) { DriverStat d; if (St.DriverStats.TryGetValue(DriverVersion, out d)) d.Crashes++; } }
+        /// Driver scorecard, backup and rollback are for Intel cards: another adapter (a USB one in use for a while) never
+        /// gets into them, so a rollback can't aim at the wrong device.
         void OnDriverChanged()
         {
+            if (!Adapter.IsIntel) return;
             lock (StLock) { if (!St.DriverStats.ContainsKey(DriverVersion)) St.DriverStats[DriverVersion] = new DriverStat { FirstSeen = DateTime.UtcNow }; }
             if (CanAct) ThreadPool.QueueUserWorkItem(_ => BackupDriver());
         }
@@ -364,7 +379,9 @@ namespace AX210WatchClaude
         {
             try
             {
-                var ver = DriverVersion; var dir = Path.Combine(DriverDir, ver);
+                var ver = DriverVersion; if (string.IsNullOrEmpty(ver) || ver == "?" || !Adapter.Found || StandIn || !Adapter.IsIntel) return;   // card missing: backed up once it's back
+                var hwid = Adapter.HardwareId; if (hwid != "") lock (StLock) St.DriverHardwareId = hwid;   // always this card's, even when the copy exists
+                var dir = Path.Combine(DriverDir, ver);
                 if (Directory.Exists(dir) && Directory.GetFiles(dir, "*.inf").Length > 0) { MarkBacked(ver); return; }
                 string so, se;
                 var script = "$id=(Get-NetAdapter -Name " + Ps.Q(Adapter.Name) + ").PnPDeviceID; $inf=(Get-PnpDeviceProperty -InstanceId $id -KeyName DEVPKEY_Device_DriverInfPath).Data; " +
@@ -373,6 +390,7 @@ namespace AX210WatchClaude
                 Ps.Run(script, 300, out so, out se);
                 var hw = Regex.Match(so ?? "", @"HWID=(\S+)").Groups[1].Value;
                 if (hw != "") lock (StLock) St.DriverHardwareId = hw;
+
                 if (Directory.Exists(dir) && Directory.GetFiles(dir, "*.inf").Length > 0) { MarkBacked(ver); Log.Write("DRIVER", "Saved a copy of Intel driver " + ver + " for rollback"); PruneDriverBackups(); }
                 else Log.Write("ERROR", "Driver backup failed: " + so + " " + se);
             }
@@ -397,12 +415,19 @@ namespace AX210WatchClaude
         {
             var dir = Path.Combine(DriverDir, version); var inf = Directory.Exists(dir) ? Directory.GetFiles(dir, "*.inf").FirstOrDefault() : null;
             if (inf == null) return "No saved copy of driver " + version + ".";
-            if (string.IsNullOrEmpty(St.DriverHardwareId)) return "The card's hardware ID isn't known yet, so I can't roll back automatically.";
+            if (StandIn || CardMissing || !Adapter.Found) return "This PC's Wi-Fi card isn't available right now, so there's nothing to roll back.";
+            if (!Adapter.IsIntel || !OwnCardInUse()) return "Driver rollback is for this PC's Intel card, and another adapter is in use right now.";
+            var hwid = Adapter.HardwareId; if (hwid == "") lock (StLock) hwid = St.DriverHardwareId;
+            if (string.IsNullOrEmpty(hwid)) return "The card's hardware ID isn't known yet, so I can't roll back automatically.";
             var from = DriverVersion; Log.Write("DRIVER", "Rolling back Intel driver " + from + " → " + version);
-            bool reboot; bool ok = Native2.UpdateDriverForPlugAndPlayDevices(IntPtr.Zero, St.DriverHardwareId, inf, 1 /* INSTALLFLAG_FORCE */, out reboot);
-            int err = Marshal.GetLastWin32Error();
+            bool reboot, ok; int err; string why;
+            using (Adapter.Work())   // the card goes away while Windows installs the driver: not a crash
+            {
+                ok = Native2.UpdateDriverForPlugAndPlayDevices(IntPtr.Zero, hwid, inf, 1 /* INSTALLFLAG_FORCE */, out reboot);
+                err = Marshal.GetLastWin32Error();
+                if (ok) WaitForBand(Profiles.BandOf(St.CurrentMode), 120, out why);
+            }
             if (!ok) { Log.Write("ERROR", "Driver rollback failed (Windows error " + err + ")"); return "Rollback failed (Windows error " + err + "). Your current driver " + from + " is unchanged."; }
-            string why; WaitForBand(Profiles.BandOf(St.CurrentMode), 120, out why);
             DriverVersion = Adapter.DriverVersion(); St.LastDriverVersion = DriverVersion; lastProfileCheck = DateTime.MinValue; OnDriverChanged(); Save();
             return "Installed Intel driver " + DriverVersion + (reboot ? ". Windows wants a restart to finish." : ".") + " Now on " + Describe(Wlan.GetConnection()) + ".";
         }
@@ -517,11 +542,21 @@ namespace AX210WatchClaude
 
             if (!InGame) { Wlan.Scan(); Thread.Sleep(4000); }
             var bss = Wlan.GetBssList(); var ext = bss.Where(b => IsAvoidBssid(b.Bssid)).ToList();
+            var home = CurrentHome;
             if (Cfg.AvoidBssids.Count == 0) R("INFO", "Extender", "none set up (Setup assistant finds them)");
-            else if (ext.Any(b => b.Ssid == Cfg.HomeSsid)) R("WARN", "Extender", "broadcasts \"" + Cfg.HomeSsid + "\" too, on " + string.Join(", ", ext.Where(b => b.Ssid == Cfg.HomeSsid).Select(b => b.Band + " GHz ch " + b.Channel)) + ". Avoided, but renaming its network is the sure fix");
+            else if (ext.Any(b => b.Ssid == home)) R("WARN", "Extender", "broadcasts \"" + home + "\" too, on " + string.Join(", ", ext.Where(b => b.Ssid == home).Select(b => b.Band + " GHz ch " + b.Channel)) + ". Avoided, but renaming its network is the sure fix");
             else if (ext.Count > 0) R("OK", "Extender", "uses its own network name; this PC won't join it");
             else R("INFO", "Extender", "not visible right now" + (InGame ? " (no scans during games)" : ""));
             if (c.Connected) { int same = bss.Count(b => b.Band == c.Band && b.Channel == c.Channel && b.Ssid != c.Ssid); R(same <= 3 ? "OK" : "WARN", "Channel crowding", same + (same == 1 ? " other network on " : " other networks on ") + c.Band + " GHz ch " + c.Channel); }
+            if (c.Connected && c.Band == "5")
+            {
+                int dfs; lock (StLock) dfs = St.Incidents.Count(i => i.Kind == "dfs" && i.Time > DateTime.UtcNow.AddDays(-30));
+                if (IsDfs(c.Channel)) R(dfs > 0 ? "WARN" : "INFO", "Radar channels (DFS)", "channel " + c.Channel + " is a radar channel: if the router detects radar it must leave, which can drop you for up to a minute" + (dfs > 0 ? " (" + dfs + " time" + (dfs == 1 ? "" : "s") + " in 30 days)" : "") + ". Channels 36–48 or 149–165 avoid that");
+                else R("OK", "Radar channels (DFS)", "channel " + c.Channel + " isn't one" + (dfs > 0 ? " (" + dfs + " radar channel change" + (dfs == 1 ? "" : "s") + " in 30 days)" : ""));
+            }
+            var btNow = Bt.Connected();
+            R(btNow == "" ? "OK" : c.Connected && c.Band == "2.4" ? "WARN" : "INFO", "Bluetooth", btNow == "" ? "nothing connected" : btNow + " connected. Bluetooth shares the Wi-Fi card's antenna" + (c.Connected && c.Band == "2.4" ? " and the 2.4 GHz band you're on: expect lag spikes" : "; if games stall with it on, a wired or 2.4 GHz-dongle headset helps") + BtStallNote());
+            R(WiredName != null ? "INFO" : "OK", "Connection", (WiredName != null ? "Ethernet in use (" + WiredName + "); Wi-Fi is watched only" : "Wi-Fi carries the internet traffic") + (Metered ? " · metered: data-heavy tests ask first" : ""));
 
             string server; var loc = Upnp.Location(out server);
             if (loc == null) R("WARN", "UPnP", "router didn't answer; peer-to-peer co-op games may get a strict NAT");
@@ -534,7 +569,7 @@ namespace AX210WatchClaude
 
             string so, se;
             Ps.Run("$x=[ordered]@{}; " +
-                   "$x.mac=((netsh wlan show profile name=" + Ps.Q(Cfg.HomeSsid) + " | Select-String 'MAC Randomization') -replace '.*:\\s*','').Trim(); " +
+                   "$na=Get-NetAdapter -Name " + Ps.Q(Adapter.Name) + " -ErrorAction SilentlyContinue; $x.mac=[string]$na.MacAddress + '|' + [string]$na.PermanentAddress; " +
                    "$x.wifipower=((powercfg /query SCHEME_CURRENT 19cbb8fa-5279-450e-9fac-8a3d5fedd0c1 12bbebe6-58d6-4636-95bb-3217ef867c1a | Select-String 'Current AC Power Setting Index') -replace '.*:\\s*','').Trim(); " +
                    "$x.aspm=((powercfg /query SCHEME_CURRENT 501a4d13-42af-4429-9fd1-a8218c268e20 ee12f906-d277-404b-b6da-e5fa1a576df5 | Select-String 'Current AC Power Setting Index') -replace '.*:\\s*','').Trim(); " +
                    "$x.autotune=((netsh int tcp show global | Select-String 'Auto-Tuning') -replace '.*:\\s*','').Trim(); " +
@@ -543,7 +578,9 @@ namespace AX210WatchClaude
                    "$x.Keys | ForEach-Object { $_ + '=' + $x[$_] }", 60, out so, out se);
             var kv = (so ?? "").Split('\n').Select(l => l.Trim()).Where(l => l.Contains("=")).ToDictionary(l => l.Substring(0, l.IndexOf('=')), l => l.Substring(l.IndexOf('=') + 1));
             Func<string, string> K = k => { string v; return kv.TryGetValue(k, out v) ? v : ""; };
-            R(K("mac").StartsWith("Disabled", StringComparison.OrdinalIgnoreCase) ? "OK" : "WARN", "MAC randomization", K("mac") == "" ? "unknown" : K("mac") + (K("mac").StartsWith("Disabled") ? " (the router always recognizes this PC, so per-device priority sticks)" : " — router per-device priority/boost may not recognize this PC"));
+            var macs = K("mac").Split('|'); bool? random = macs.Length == 2 ? MacDiffers(macs[0], macs[1]) : null;
+            R(random == false ? "OK" : random == true ? "WARN" : "INFO", "Hardware address", random == null ? "unknown" : random == false ? "this PC's own (the router always recognizes it, so per-device priority and reservations stick)"
+                : "random on this network: router per-device priority/reservations may not recognize this PC" + (Cfg.FixedHardwareAddress && IsHome(c.Ssid) ? " (the watchdog turns it off when no game is running)" : ""));
             R(K("wifipower") == "0x00000000" ? "OK" : "WARN", "Wi-Fi power saving", K("wifipower") == "0x00000000" ? "maximum performance" : "not at maximum performance (" + K("wifipower") + ")");
             R(K("aspm") == "0x00000000" ? "OK" : "WARN", "PCIe power saving", K("aspm") == "0x00000000" ? "off" : "on (" + K("aspm") + ")");
             R(K("autotune").StartsWith("normal", StringComparison.OrdinalIgnoreCase) ? "OK" : "WARN", "TCP auto-tuning", K("autotune") == "" ? "unknown" : K("autotune"));
@@ -562,8 +599,10 @@ namespace AX210WatchClaude
             bool ts = Process.GetProcessesByName("tailscaled").Length > 0;
             R(nrpt == 0 ? (ts ? "INFO" : "OK") : "WARN", "DNS rules / Tailscale", (nrpt == 0 ? "no DNS-rules errors this week" : nrpt + " DNS-rules errors this week") + (ts ? "; Tailscale service is running" : ""));
             var q8 = AvoidSummary(); R("INFO", "Avoiding", q8 == "" ? "nothing" : q8);
-            R("INFO", "Options", string.Format("upload limiter {0} · fast downloads on 6 GHz {1} · session reports {2} · download warnings {3}",
-                Cfg.UploadLimiter ? "on" : "off", Cfg.TurboDownloads ? "on" : "off", Cfg.SessionReports ? "on" : "off", Cfg.BandwidthGuard ? "on" : "off"));
+            R("INFO", "Options", string.Format("upload limiter {0} · fast downloads on 6 GHz {1} · session reports {2} · download warnings {3} · streaming/VR as games {4} · mesh node hold {5}",
+                Cfg.UploadLimiter ? "on" : "off", Cfg.TurboDownloads ? "on" : "off", Cfg.SessionReports ? "on" : "off", Cfg.BandwidthGuard ? "on" : "off", Cfg.StreamingAsGames ? "on" : "off", Cfg.MeshHold ? "on" : "off"));
+            if (HasBattery) R("INFO", "Battery", Cfg.BatteryAware ? "laptop: Wi-Fi power saving stays normal on battery and is lifted while a game runs" : "laptop: Wi-Fi power saving off on battery too (battery-aware mode is off)");
+            if (HomeNetworks.Count > 1) R("INFO", "Home networks", string.Join(", ", HomeNetworks));
             var head = string.Format("Network checkup — {0} OK, {1} warning{2}, {3} problem{4}", ok, warn, warn == 1 ? "" : "s", fail, fail == 1 ? "" : "s");
             Log.Write("TEST", head);
             return head + "\r\n\r\n" + string.Join("\r\n", lines);

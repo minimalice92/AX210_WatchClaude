@@ -46,6 +46,20 @@ namespace AX210WatchClaude
             if (o.AutoActions != n.AutoActions) notes.Add(n.AutoActions ? "automatic fixes on" : "automatic fixes off (monitor only)");
             if (!o.AutoActions && n.AutoActions && CanAct) ThreadPool.QueueUserWorkItem(_ => Harden());   // the start-up tuning was skipped while it was off
             if (o.TurboDownloads != n.TurboDownloads) notes.Add("fast downloads " + (n.TurboDownloads ? "on" : "off"));
+            if (!Same(o.OtherHomeNetworks, n.OtherHomeNetworks) || o.HomeSsid != n.HomeSsid)
+            {
+                int hn = HomeNetworks.Count;
+                notes.Add(hn == 0 ? "no home network set (the next network you connect to becomes it)" : hn == 1 ? "home network set" : hn + " home networks");
+                if (hn > 0) { lock (StLock) St.HistoryImported = false; ThreadPool.QueueUserWorkItem(_ => ImportHistory()); }   // crash history for every home network
+            }
+            if (IsAdmin && o.BatteryAware != n.BatteryAware && HasBattery && n.AutoActions) { ThreadPool.QueueUserWorkItem(_ => Harden()); notes.Add("battery power saving " + (n.BatteryAware ? "on" : "off")); }
+            if (IsAdmin && o.FixedHardwareAddress && !n.FixedHardwareAddress) ThreadPool.QueueUserWorkItem(_ => { var m = RestoreRandomization("setting turned off"); if (m != "") Log.Write("INFO", m); });
+            if (o.FixedHardwareAddress != n.FixedHardwareAddress) { notes.Add(n.FixedHardwareAddress ? "this PC's own hardware address on home networks" : "random hardware address left to Windows"); nextMacCheck = DateTime.Now; }
+            if (o.EthernetStandDown != n.EthernetStandDown) { lastWired = DateTime.MinValue; notes.Add("Ethernet stand-down " + (n.EthernetStandDown ? "on" : "off")); }
+            if (o.StreamingAsGames != n.StreamingAsGames) notes.Add("streaming and VR " + (n.StreamingAsGames ? "count as games" : "no longer count as games"));
+            if (o.MeshHold != n.MeshHold) { if (!n.MeshHold) holdBssid = ""; notes.Add("mesh node hold " + (n.MeshHold ? "on" : "off")); }
+            if (o.UpdateCheck != n.UpdateCheck) notes.Add("update check " + (n.UpdateCheck ? "on" : "off"));
+            if (o.WeeklySummary != n.WeeklySummary) notes.Add("weekly summary " + (n.WeeklySummary ? "on" : "off"));
             Log.Write("INFO", "Settings saved" + (notes.Count > 0 ? ": " + string.Join("; ", notes) : ""));
             nudge.Set();
             return notes.Count > 0 ? char.ToUpper(notes[0][0]) + string.Join("; ", notes).Substring(1) + "." : "Saved. Nothing needed re-applying.";
@@ -216,8 +230,9 @@ namespace AX210WatchClaude
     {
         readonly Watchdog wd; readonly Theme T; readonly Action<string> onSaved; readonly FlowLayoutPanel flow;
         readonly ToggleSwitch tAuto, tNotify, tDefer, tLowLat, tEnforce, tQos, tWfd, tReports, tGuard, tDns, tUpload, tTurbo, tStartup;
+        readonly ToggleSwitch tUpdate, tWeekly, tMac, tWired, tMesh, tBattery, tStream;
         readonly bool startupWas; readonly Panel foot;
-        readonly InputFrame fHome, fAvoidCh, fAvoidBssid, fQosExes, fGames, fExtra, fIgnore, fTarget;
+        readonly InputFrame fHome, fOther, fAvoidCh, fAvoidBssid, fQosExes, fGames, fExtra, fIgnore, fTarget;
         readonly NumberField nDwell, nProbe, nQuar, nRx, nTx, nDnsDays, nCap, nTurbo, nStall, nSample, nKeep, nUdp;
         readonly BandOrderEditor order;
 
@@ -239,6 +254,26 @@ namespace AX210WatchClaude
             gen.AddRow("Wait for games", "Hold non-urgent changes until the game closes. Urgent fixes, like an active driver crash, still happen.", tDefer = Tog());
             gen.AddRow("Start with Windows", "Starts quietly in the tray when you sign in, and restarts itself within 5 minutes if it ever stops.", tStartup = Tog());
             gen.AddRow("Home network", "The Wi-Fi name the watchdog manages. On any other network it only watches.", fHome = Box(false, 32));
+            var otherWrap = new Panel { BackColor = T.Card, Size = new Size(Ui.D(SectionCard.ColWidth), Ui.D(104)) };
+            fOther = Box(true, 66); fOther.Location = new Point(0, 0); otherWrap.Controls.Add(fOther);
+            var addNet = new ActionButton(T, "", "Add the current network", false) { Surface = T.Card, Location = new Point(0, Ui.D(72)) };
+            addNet.Click += (s, e) =>
+            {
+                var cur = wd.Conn; var have = Lines(fOther).ToList();
+                if (!cur.Connected || string.IsNullOrEmpty(cur.Ssid)) { MessageBox.Show(this, "Wi-Fi isn't connected to a network right now.", "AX210_WatchClaude"); return; }
+                if (cur.Ssid == fHome.Box.Text.Trim() || have.Contains(cur.Ssid)) return;
+                fOther.Box.AppendText((fOther.Box.Text.Length > 0 && !fOther.Box.Text.EndsWith("\n") ? "\r\n" : "") + Ui.Rd(cur.Ssid) + "\r\n");
+            };
+            otherWrap.Controls.Add(addNet);
+            gen.AddRow("Other home networks", "More networks to manage the same way (a second home, a dorm, the office), one per line. The extender and channel lists apply to all of them.", otherWrap);
+            gen.AddRow("Check for updates", "Once a week, asks GitHub for the latest release and tells you when there's a newer one. Nothing else is sent.", tUpdate = Tog());
+            gen.AddRow("Weekly summary", "A short note once a week: game sessions, driver crashes, dropouts and typical ping.", tWeekly = Tog());
+            var backupWrap = new FlowLayoutPanel { BackColor = T.Card, Size = new Size(Ui.D(SectionCard.ColWidth), Ui.D(34)), WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
+            var bBackup = new ActionButton(T, "", "Back up…", false) { Surface = T.Card, Margin = new Padding(0, 0, Ui.D(6), 0) };
+            var bRestore = new ActionButton(T, "", "Restore…", false) { Surface = T.Card, Margin = Padding.Empty };
+            bBackup.Click += (s, e) => Backup(); bRestore.Click += (s, e) => RestoreBackup();
+            backupWrap.Controls.Add(bBackup); backupWrap.Controls.Add(bRestore);
+            gen.AddRow("Backup", "Saves your settings and learned history (crashes, channels, sessions, drivers) to a file, for a reinstall or a new PC.", backupWrap);
             var bSetup = new ActionButton(T, "", "Run setup assistant…", false) { Surface = T.Card };
             bSetup.Click += (s, e) => { var a = TrayApp.Current; if (a != null) { Close(); a.ShowSetup(); } };
             gen.AddRow("Setup assistant", "Re-detects your adapter, extenders and crash-prone channels and suggests settings.", bSetup);
@@ -250,6 +285,10 @@ namespace AX210WatchClaude
             wifi.AddRow("Avoid access points", "One BSSID per line: extenders that broadcast your network name but shouldn't be used.", fAvoidBssid = Box(true, 100));
             wifi.AddRow("Low-latency mode", "Keeps Windows' background Wi-Fi scans off and streaming mode on while connected.", tLowLat = Tog());
             wifi.AddRow("Keep adapter settings optimized", "Re-applies the tuned Intel settings if a driver update or anything else changes them.", tEnforce = Tog());
+            wifi.AddRow("Use this PC's own hardware address", "Turns off Windows' random hardware address on home networks, so the router always recognizes this PC and its device priority and reservations stick. Wi-Fi reconnects once.", tMac = Tog());
+            wifi.AddRow("Step back when Ethernet is in use", "While a cable carries the internet traffic, the watchdog only watches Wi-Fi.", tWired = Tog());
+            wifi.AddRow("Hold the mesh node during games", "With several access points of the same brand (a mesh), keeps the PC on its strongest one during a game and moves it back if it drifts to a clearly weaker one.", tMesh = Tog());
+            wifi.AddRow("Laptops: save power on battery", "On battery, Wi-Fi power saving stays at Windows' normal level, and is lifted only while a game runs. No effect on desktops.", tBattery = Tog());
             wifi.AddRow("Minimum time between band switches", "Stops the watchdog from flip-flopping. Urgent fixes ignore this.", nDwell = Num("minutes"));
             wifi.AddRow("Retry the preferred band every", "How often to check whether the preferred band is usable again (never during games).", nProbe = Num("hours"));
             wifi.AddRow("Avoid a crashing channel for", "After 2 driver crashes in 30 minutes on a channel. Five crashes in 24 hours triples this.", nQuar = Num("hours"));
@@ -259,6 +298,7 @@ namespace AX210WatchClaude
             game.AddRow("Wi-Fi priority for game traffic", "Tags each game's real-time (UDP) traffic so it goes first on your Wi-Fi. Downloads are never prioritized.", tQos = Tog());
             game.AddRow("Prioritize from startup", "Game programs tagged right away, one per line (e.g. Overwatch.exe). Other games get tagged the first time you play them.", fQosExes = Box(true, 72));
             game.AddRow("Pause Wi-Fi Direct while gaming", "Stops the card leaving your channel to look for casting or hotspot devices. Restored when the game closes.", tWfd = Tog());
+            game.AddRow("Treat streaming and VR as games", "Steam Link, Moonlight, Sunshine, Parsec, Virtual Desktop, Air Link, SteamVR, GeForce NOW and Shadow get game treatment while they stream: priority in Wi-Fi's video queue, no changes mid-session.", tStream = Tog());
             game.AddRow("Game session reports", "A one-line summary when a game closes: ping, loss, stalls, crashes and where you were connected.", tReports = Tog());
             game.AddRow("Warn about downloads while gaming", "Tells you when something on this PC is downloading or uploading heavily during a game, and names it.", tGuard = Tog());
             game.AddRow("Download warning above", "Sustained for 20 seconds while a game is running.", nRx = Num("Mbps"));
@@ -337,6 +377,26 @@ namespace AX210WatchClaude
             MinimumSize = new Size(Width, Math.Min(Ui.D(480), wa.Height)); MaximumSize = new Size(Width, wa.Height + Ui.D(40));
         }
 
+        void Backup()
+        {
+            using (var d = new SaveFileDialog { Title = "Back up AX210_WatchClaude", Filter = "AX210_WatchClaude backup (*.json)|*.json", FileName = "AX210_WatchClaude-backup-" + DateTime.Now.ToString("yyyy-MM-dd") + ".json", InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) })
+            {
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                string r; try { r = wd.ExportBackup(d.FileName); } catch (Exception ex) { r = "Couldn't save the backup: " + ex.Message; }
+                MessageBox.Show(this, r, "Back up", MessageBoxButtons.OK, r.StartsWith("Couldn't") ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+            }
+        }
+        void RestoreBackup()
+        {
+            using (var d = new OpenFileDialog { Title = "Restore AX210_WatchClaude", Filter = "AX210_WatchClaude backup (*.json)|*.json|All files (*.*)|*.*", InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) })
+            {
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                if (MessageBox.Show(this, "Replace your current settings with the ones in this backup, and add its history to what's here?", "Restore", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                var r = wd.ImportBackup(d.FileName); Fill(wd.Cfg);
+                MessageBox.Show(this, r, "Restore", MessageBoxButtons.OK, r.StartsWith("That file") ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+            }
+        }
+
         ToggleSwitch Tog() { return new ToggleSwitch(T); }
         InputFrame Box(bool multi, int h) { return new InputFrame(T, multi, Ui.D(SectionCard.ColWidth), Ui.D(h)); }
         NumberField Num(string unit) { return new NumberField(T, unit); }
@@ -350,6 +410,8 @@ namespace AX210WatchClaude
         void Fill(Config c)
         {
             tAuto.Checked = c.AutoActions; tNotify.Checked = c.Notifications; tDefer.Checked = c.DeferWhileGaming; fHome.Box.Text = Ui.Rd(c.HomeSsid ?? "");
+            fOther.Box.Text = Ui.Rd(J(c.OtherHomeNetworks)); tUpdate.Checked = c.UpdateCheck; tWeekly.Checked = c.WeeklySummary;
+            tMac.Checked = c.FixedHardwareAddress; tWired.Checked = c.EthernetStandDown; tMesh.Checked = c.MeshHold; tBattery.Checked = c.BatteryAware; tStream.Checked = c.StreamingAsGames;
             order.Order = c.BandOrder ?? new List<string>(); fAvoidCh.Box.Text = string.Join(", ", c.AvoidChannels5 ?? new List<int>()); fAvoidBssid.Box.Text = Ui.Rd(J(c.AvoidBssids));
             tLowLat.Checked = c.LowLatencyMode; tEnforce.Checked = c.EnforceAdapterProfile;
             nDwell.Raw = c.SwitchDwellMinutes.ToString(); nProbe.Raw = c.ProbePreferredHours.ToString(); nQuar.Raw = c.QuarantineHours.ToString();
@@ -365,6 +427,10 @@ namespace AX210WatchClaude
         {
             n = Json.S().Deserialize<Config>(Json.S().Serialize(wd.Cfg)); err = null; var errs = new List<string>();
             n.AutoActions = tAuto.Checked; n.Notifications = tNotify.Checked; n.DeferWhileGaming = tDefer.Checked; n.HomeSsid = fHome.Box.Text.Trim();
+            var homeName = n.HomeSsid; n.OtherHomeNetworks = Lines(fOther).Where(x => x != homeName).Distinct().ToList();   // SSIDs are case-sensitive
+            foreach (var s in n.OtherHomeNetworks.Where(x => System.Text.Encoding.UTF8.GetByteCount(x) > 32)) errs.Add("Other home networks: \"" + s + "\" is longer than a Wi-Fi name can be.");
+            n.UpdateCheck = tUpdate.Checked; n.WeeklySummary = tWeekly.Checked;
+            n.FixedHardwareAddress = tMac.Checked; n.EthernetStandDown = tWired.Checked; n.MeshHold = tMesh.Checked; n.BatteryAware = tBattery.Checked; n.StreamingAsGames = tStream.Checked;
             n.BandOrder = order.Order;
             var ch = new List<int>();
             foreach (var p in fAvoidCh.Box.Text.Split(new[] { ',', ' ', ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))

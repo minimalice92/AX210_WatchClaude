@@ -199,7 +199,7 @@ namespace AX210WatchClaude
         /// Uninstall, always: game-priority / upload-limit rules removed, Wi-Fi Direct back on.
         public static void Cleanup()
         {
-            try { var wd = new Watchdog(); wd.Init(); wd.RestoreWifiDirect("uninstall"); } catch { }
+            try { var wd = new Watchdog(); wd.Init(); wd.RestoreWifiDirect("uninstall"); wd.RestoreRandomization("uninstall"); } catch { }
             string o; Ps.Run("Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'AX210_WatchClaude*' } | Remove-NetQosPolicy -Confirm:$false", 60, out o);
         }
     }
@@ -284,7 +284,7 @@ namespace AX210WatchClaude
             try
             {
                 string summary; Dictionary<string, string> known; lock (StLock) known = new Dictionary<string, string>(St.KnownBands);
-                foreach (var kv in EventMonitor.ImportHistory(p.Ssid, known, out summary))
+                foreach (var kv in EventMonitor.ImportHistory(new[] { p.Ssid }, known, out summary))
                 {
                     p.TotalCrashes += kv.Value[1]; var k = kv.Key.Split('|'); int ch;
                     if (k[0] == "5" && int.TryParse(k[1], out ch)) stats[ch] = new[] { kv.Value[1], kv.Value[0] };

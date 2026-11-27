@@ -48,7 +48,22 @@ Windows and the Intel driver have no setting for "stay off that channel", "stay 
 | **Low-latency mode** | While connected, keeps Windows' background Wi-Fi scans off and "media streaming mode" on, so the card never goes off-channel to scan. |
 | **Tuned adapter profile** | Lowest roaming aggressiveness, no packet coalescing, no MIMO/U-APSD power saving, CTS-to-self, max transmit power. Re-applied after driver updates. |
 | **Power settings** | Wi-Fi power saving at maximum performance, PCIe link power management off, and "allow the computer to turn off this device" off. |
-| **Driver scorecard and rollback** | Tracks crashes per connected hour for each driver version, and keeps a copy of the current driver. If an update turns out worse, it tells you and offers a one-click rollback. |
+| **Driver scorecard and rollback** | Tracks crashes per connected hour for each driver version, and keeps a copy of the current driver. If an update turns out worse, it tells you and offers a one-click rollback. Drivers that Windows Update installed on its own are marked as such. |
+
+### Handles the unusual
+
+| | |
+|---|---|
+| **Card stops responding** | When a firmware crash takes the card off the PC, the app works through the fixes in order: it restarts Windows' Wi-Fi service if that stopped, turns the card back on if Windows switched it off during the crash, then restarts or rescans the device. If nothing works it tells you to shut down fully (a restart doesn't power-cycle the card). A card you turned off yourself is left alone. |
+| **USB adapter fallback** | If the card stays gone for 30 minutes and a USB Wi-Fi adapter is plugged in, the app looks after that one instead, and switches back as soon as the card returns. Saved settings stay with the card they came from, so one adapter's settings never land on another. |
+| **Wi-Fi off, airplane mode, Ethernet** | Wi-Fi switched off is shown as such, never as a dropout. While a cable carries the internet traffic, the app only watches Wi-Fi. |
+| **Radar channels (DFS)** | When the router has to leave a radar channel (5 GHz 52–144), the app says so, so you know why Wi-Fi dropped and which channels avoid it. |
+| **Metered connections** | Tests that use a lot of data ask first, and the update check is skipped. |
+| **Random hardware address** | Turns Windows' random hardware address off on your home networks, so the router keeps recognizing the PC. It's put back on uninstall. |
+| **Laptops** | On battery, Wi-Fi power saving stays at Windows' level, except while a game runs. |
+| **More than one home** | Other networks (a second home, dorm or office) can be managed like the main one. |
+| **Back up and restore** | Exports your settings and history to a file, to restore after a reinstall or on another PC. |
+| **Update notice and weekly summary** | Checks GitHub once a week for a new version, and sends a short weekly summary of dropouts, crashes and game sessions. Both can be turned off. |
 
 ### Made for gaming
 
@@ -61,6 +76,9 @@ Windows and the Intel driver have no setting for "stay off that channel", "stay 
 | **Pre-game check and session reports** | 15 s into each game it checks quietly and only speaks up if something is wrong. When the game closes you get a one-line report: ping, loss, stalls, crashes and where you were connected. |
 | **Download warnings** | Tells you, by program name, when something on the PC downloads or uploads heavily during a game. |
 | **Upload limiter** *(optional)* | Caps non-game uploads just below your line speed so big uploads don't add lag. |
+| **Game streaming** | Steam Link, Moonlight, Virtual Desktop, GeForce NOW and similar count as game sessions once they're streaming. |
+| **Mesh networks** | During a game, keeps the PC on the mesh node it started on, so Windows can't hop it to another node mid-match. |
+| **Bluetooth headsets** | Bluetooth shares the card's antenna. The pre-game check warns when a Bluetooth device is connected while Wi-Fi is on 2.4 GHz, and the checkup shows whether your sessions stall more with Bluetooth on. |
 
 ### Tests and diagnostics
 
@@ -156,7 +174,7 @@ Only administrators can change the data folder. The settings drive an elevated a
 
 ## Privacy
 
-Everything stays on your PC. There's no telemetry, no account and no cloud service. The only network traffic is what the tests themselves need: pings, DNS queries, the speed test (Cloudflare's speed endpoints) and a UPnP query to your own router.
+Everything stays on your PC. There's no telemetry, no account and no cloud service. The only network traffic is what the tests themselves need (pings, DNS queries, the speed test against Cloudflare's speed endpoints, and a UPnP query to your own router), plus a weekly check of this project's latest GitHub release, which you can turn off in Settings. The update check sends nothing about you or your PC.
 
 ## Build from source
 
@@ -171,6 +189,7 @@ You need Visual Studio 2019+ or the Build Tools (for the Roslyn C# compiler and 
 |---|---|
 | `src\AX210_WatchClaude.cs` | watchdog core: Wi-Fi API, adapter control, ping monitor, crash decoder, games, DNS, tests, tray |
 | `src\Features.cs` | game sessions, Wi-Fi Direct, driver scorecard/rollback, upload limiter, network checkup |
+| `src\Robust.cs` | card recovery and USB fallback, Ethernet, metered, DFS, mesh, Bluetooth, streaming, laptops, hardware address, updates, backup |
 | `src\UI.cs`, `src\Settings.cs`, `src\Setup.cs` | status window, settings, setup assistant, installer hooks |
 | `src\Brand.cs`, `tools\MakeAssets.cs` | the icon and installer artwork, drawn in code |
 | `installer\AX210_WatchClaude.iss` | Inno Setup script |

@@ -564,6 +564,9 @@ namespace AX210WatchClaude
             if (wd.InGame) { var s0 = wd.Session; pills.Add(Tuple.Create(wd.CurrentGame + (s0 != null ? " · " + (int)(DateTime.Now - s0.Start).TotalMinutes + " min" : ""), T.Purple)); }
             if (wd.St.TurboActive) pills.Add(Tuple.Create("Fast-download mode", T.Accent));
             if (wd.St.WifiDirectDisabled.Count > 0) pills.Add(Tuple.Create("Wi-Fi Direct paused", T.Sub));
+            if (wd.WiredName != null) pills.Add(Tuple.Create("Ethernet in use", T.Sub));
+            if (wd.Metered) pills.Add(Tuple.Create("Metered", T.Warn));
+            var upd = wd.AvailableUpdate; if (upd != null) pills.Add(Tuple.Create("Update " + upd + " available", T.Accent));
             pills.Add(WatchdogPill());
             header.Set(wd.Level, ht, hs, pills);
             // tiles
@@ -581,7 +584,7 @@ namespace AX210WatchClaude
             bool badCh = up && c.Band == "5" && wd.Cfg.AvoidChannels5.Contains(c.Channel), onExt = up && wd.IsAvoidBssid(c.Bssid);
             string ll = wd.LowLatencyState ?? "";
             iConn.SetRows(new List<InfoCard.Row> {
-                R("Network", up ? c.Ssid : "—"),
+                R("Network", (up ? c.Ssid + (wd.IsHome(c.Ssid) || string.IsNullOrEmpty(wd.Cfg.HomeSsid) ? "" : "  ·  not a home network (watching only)") : "—") + (wd.Metered ? "  ·  metered" : "") + (wd.WiredName != null ? "  ·  Ethernet in use" : "")),
                 R("Access point", up ? wd.ApName(c.Bssid) + "  ·  " + c.Bssid : "—", onExt ? (Color?)T.Bad : null),
                 R("Band / channel", up ? c.Band + " GHz · channel " + c.Channel : "—", badCh ? (Color?)T.Bad : null),
                 R("Band mode", !Adapter.CanLockBands ? "not supported by this adapter's driver" : Profiles.Name(wd.St.CurrentMode) + (wd.St.CurrentMode == "6b" ? " (5 GHz allowed)" : "") + "  ·  preferred " + wd.PreferredBand() + " GHz"),
@@ -613,13 +616,13 @@ namespace AX210WatchClaude
 
         static readonly Dictionary<string, string> TypeNames = new Dictionary<string, string> {
             {"INCIDENT","Crash"}, {"ACTION","Action"}, {"CONN","Connection"}, {"GAME","Game"}, {"SESSION","Session"}, {"DRIVER","Driver"}, {"DNS","DNS"},
-            {"UDP","Ports"}, {"ISP","Internet"}, {"TEST","Test"}, {"ERROR","Error"}, {"START","Start"}, {"INFO","Info"} };
+            {"UDP","Ports"}, {"ISP","Internet"}, {"TEST","Test"}, {"ERROR","Error"}, {"START","Start"}, {"INFO","Info"}, {"SUMMARY","Summary"} };
         Color TypeColor(string t)
         {
             switch (t)
             {
                 case "INCIDENT": case "ERROR": return T.Bad;
-                case "ACTION": return T.Accent;
+                case "ACTION": case "SUMMARY": return T.Accent;
                 case "GAME": case "SESSION": return T.Purple;
                 case "DRIVER": case "DNS": case "UDP": case "ISP": return T.Warn;
                 case "START": return T.Good;
@@ -683,7 +686,7 @@ namespace AX210WatchClaude
                 foreach (var kv in wd.St.DriverStats.OrderByDescending(x => x.Value.FirstSeen))
                 {
                     bool cur = kv.Key == wd.DriverVersion; string copy = cur ? (kv.Value.BackedUp ? "Saved" : "Saving…") : saved.Contains(kv.Key) ? "Saved" : "Not saved";
-                    drivers.Items.Add(new ListViewItem(new[] { kv.Key + (cur ? "  (current)" : ""), kv.Value.Hours.ToString("0.0"), kv.Value.Crashes.ToString(),
+                    drivers.Items.Add(new ListViewItem(new[] { kv.Key + (cur ? "  (current)" : "") + (kv.Value.ViaWindowsUpdate ? "  · Windows Update" : ""), kv.Value.Hours.ToString("0.0"), kv.Value.Crashes.ToString(),
                         kv.Value.Hours > 0.5 ? (kv.Value.Crashes / kv.Value.Hours).ToString("0.00") : "—", kv.Value.FirstSeen.ToLocalTime().ToString("yyyy-MM-dd"), copy })
                     { Tag = copy == "Saved" ? T.Good : copy == "Saving…" ? T.Warn : T.Sub, ForeColor = cur ? T.Accent : T.Text, Font = cur ? Ui.BodyBold : Ui.Body });
                 }
